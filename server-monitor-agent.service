@@ -1,0 +1,17 @@
+[Unit]
+Description=Server Monitor Agent
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=root
+Group=root
+WorkingDirectory=/opt/server-monitor-agent
+ExecStart=/opt/server-monitor-agent/venv/bin/python -m server_monitor_agent run
+Restart=always
+RestartSec=10
+Environment=PYTHONUNBUFFERED=1
+
+[Install]
+WantedBy=multi-user.target
