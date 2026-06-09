@@ -15,7 +15,9 @@ from .config import (
     merge_services,
     parse_remote_services,
     save_credentials,
+    write_local_config,
 )
+from .detect import detect_services, services_to_yaml_items
 
 logging.basicConfig(
     level=logging.INFO,
@@ -47,6 +49,34 @@ def cmd_register(server_url: str, token: str, config_path: Path | None = None) -
 
     save_credentials(api_key, resolved_url)
     logger.info("Registrasi berhasil untuk host: %s", result.get("host_name"))
+    return 0
+
+
+def cmd_detect(config_path: Path | None = None, write: bool = False) -> int:
+    services = detect_services()
+    if not services:
+        logger.warning("Tidak ada layanan dikenal yang terdeteksi")
+        if not write:
+            return 0
+
+    items = services_to_yaml_items(services)
+    for item in items:
+        if item.get("type") == "systemd":
+            logger.info("  %s (systemd: %s)", item["name"], item.get("unit"))
+        else:
+            logger.info("  %s (tcp: %s)", item["name"], item.get("target"))
+
+    if write:
+        target = config_path or CONFIG_FILE
+        local = load_local_config(target if target.exists() else None)
+        write_local_config(
+            server_url=local.server_url,
+            interval_seconds=local.interval_seconds,
+            services=items,
+            path=target,
+        )
+        logger.info("Config diperbarui: %s (%d service)", target, len(items))
+
     return 0
 
 
@@ -111,6 +141,10 @@ def build_parser() -> argparse.ArgumentParser:
     register.add_argument("--token", required=True, help="Registration token dari dashboard")
     register.add_argument("--config", type=Path, default=None, help="Path config.yaml")
 
+    detect = sub.add_parser("detect", help="Deteksi layanan systemd yang aktif")
+    detect.add_argument("--config", type=Path, default=None, help="Path config.yaml")
+    detect.add_argument("--write", action="store_true", help="Tulis hasil ke config.yaml")
+
     run = sub.add_parser("run", help="Jalankan loop monitoring")
     run.add_argument("--config", type=Path, default=None, help="Path config.yaml")
     run.add_argument("--once", action="store_true", help="Jalankan sekali lalu keluar")
@@ -124,6 +158,8 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.command == "register":
         return cmd_register(args.server_url, args.token, args.config)
+    if args.command == "detect":
+        return cmd_detect(args.config, write=args.write)
     if args.command == "run":
         config_path = args.config or (CONFIG_FILE if CONFIG_FILE.exists() else None)
         return cmd_run(config_path, once=args.once)

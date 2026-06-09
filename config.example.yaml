@@ -1,24 +1,4 @@
-server_url: "https://monitoring.example.com"
+server_url: ""
 interval_seconds: 30
-services:
-  - name: nginx
-    type: systemd
-    unit: nginx
-  - name: apache
-    type: systemd
-    unit: apache2
-  - name: mysql
-    type: systemd
-    unit: mysql
-  - name: mariadb
-    type: systemd
-    unit: mariadb
-  - name: postgres
-    type: systemd
-    unit: postgresql
-  - name: mysql-tcp
-    type: tcp
-    target: "127.0.0.1:3306"
-  - name: postgres-tcp
-    type: tcp
-    target: "127.0.0.1:5432"
+# services diisi otomatis oleh setup.sh (auto-detect) atau dari dashboard
+services: []

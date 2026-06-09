@@ -6,56 +6,47 @@ Agent Python yang di-install di VM client untuk memantau status layanan (nginx, 
 
 - Linux dengan systemd
 - Python 3.9+
+- Git (untuk clone otomatis)
 - Akses jaringan ke server monitoring
 
-## Instalasi
+## Setup Cepat (Disarankan)
 
-### 1. Buat host di dashboard
-
-1. Login ke aplikasi monitoring
-2. Buka menu **Agents** → **Tambah Agent**
-3. Isi nama host dan salin **registration token** (hanya ditampilkan sekali)
-
-### 2. Install di VM client
-
-Salin folder `agent/` ke VM, lalu jalankan:
+1. Buat host di dashboard → **Agents** → **Tambah Agent**, salin **registration token**
+2. Di VM client, jalankan satu perintah:
 
 ```bash
-cd agent
-sudo bash install.sh
-```
-
-### 3. Konfigurasi
-
-Edit `/etc/server-monitor-agent/config.yaml`:
-
-```yaml
-server_url: "https://monitoring.example.com"
-interval_seconds: 30
-services:
-  - name: nginx
-    type: systemd
-    unit: nginx
-  - name: mysql
-    type: systemd
-    unit: mysql
-```
-
-### 4. Registrasi
-
-```bash
-sudo /opt/server-monitor-agent/venv/bin/python -m server_monitor_agent register \
+git clone git@github-aksala:aksalatech/server-agent.git /tmp/server-agent
+sudo bash /tmp/server-agent/setup.sh \
   --server-url https://monitoring.example.com \
   --token YOUR_REGISTRATION_TOKEN
 ```
 
-API key disimpan di `/etc/server-monitor-agent/credentials.json`.
+`setup.sh` akan otomatis:
+- Install dependensi dan agent ke `/opt/server-monitor-agent`
+- Mendeteksi layanan systemd yang aktif (nginx, mysql, postgres, dll)
+- Mendaftarkan agent ke server monitoring
+- Menjalankan dan mengaktifkan service systemd
 
-### 5. Jalankan service
+Sudah punya folder agent? Cukup jalankan `sudo bash setup.sh` dari dalam folder tersebut.
+
+## Instalasi Manual
+
+Jika Anda perlu langkah terpisah:
 
 ```bash
+sudo bash install.sh
+sudo bash setup.sh --server-url https://monitoring.example.com --token TOKEN
+```
+
+Atau tanpa `setup.sh`:
+
+```bash
+sudo bash install.sh
+sudo nano /etc/server-monitor-agent/config.yaml   # set server_url
+sudo /opt/server-monitor-agent/venv/bin/python -m server_monitor_agent detect --write
+sudo /opt/server-monitor-agent/venv/bin/python -m server_monitor_agent register \
+  --server-url https://monitoring.example.com --token TOKEN
 sudo systemctl enable --now server-monitor-agent
-sudo systemctl status server-monitor-agent
 ```
 
 ## Tipe Check
@@ -76,7 +67,14 @@ Agent menggabungkan config lokal (`/etc/server-monitor-agent/config.yaml`) denga
 ## Perintah
 
 ```bash
-# Registrasi
+# Setup lengkap (disarankan)
+sudo bash setup.sh --server-url URL --token TOKEN
+
+# Deteksi layanan aktif
+python -m server_monitor_agent detect
+python -m server_monitor_agent detect --write
+
+# Registrasi manual
 python -m server_monitor_agent register --server-url URL --token TOKEN
 
 # Jalankan sekali (debug)
@@ -97,3 +95,4 @@ journalctl -u server-monitor-agent -f
 - **Unauthorized saat register**: Token sudah digunakan atau kedaluwarsa. Generate token baru dari halaman detail host.
 - **Agent offline di dashboard**: Cek `systemctl status server-monitor-agent` dan pastikan `server_url` benar.
 - **Service selalu down**: Pastikan nama unit systemd benar (`systemctl status nginx`).
+- **Tidak ada service terdeteksi**: Tambahkan manual di config atau dari dashboard, atau jalankan `detect --write` setelah install layanan baru.

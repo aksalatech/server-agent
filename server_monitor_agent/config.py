@@ -90,6 +90,31 @@ def merge_services(local: list[ServiceCheck], remote: list[ServiceCheck]) -> lis
     return list(merged.values())
 
 
+def write_local_config(
+    server_url: str = "",
+    interval_seconds: int = 30,
+    services: list[dict[str, Any]] | None = None,
+    path: Path | None = None,
+) -> None:
+    config_path = path or CONFIG_FILE
+    config_path.parent.mkdir(parents=True, exist_ok=True)
+
+    data: dict[str, Any] = {}
+    if config_path.exists():
+        with config_path.open("r", encoding="utf-8") as fh:
+            data = yaml.safe_load(fh) or {}
+
+    if server_url:
+        data["server_url"] = server_url.rstrip("/")
+    if interval_seconds:
+        data["interval_seconds"] = interval_seconds
+    if services is not None:
+        data["services"] = services
+
+    with config_path.open("w", encoding="utf-8") as fh:
+        yaml.safe_dump(data, fh, default_flow_style=False, sort_keys=False, allow_unicode=True)
+
+
 def parse_remote_services(payload: dict[str, Any]) -> list[ServiceCheck]:
     services: list[ServiceCheck] = []
     for item in payload.get("services", []):
