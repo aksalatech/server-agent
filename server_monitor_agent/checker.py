@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 import socket
 import ssl
 import subprocess
@@ -7,6 +8,7 @@ import time
 import urllib.error
 import urllib.request
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Literal
 
 Status = Literal["up", "down", "unknown"]
@@ -17,6 +19,8 @@ class ServiceCheck:
     name: str
     check_type: str
     target: str
+    db_user: str | None = None
+    db_password: str | None = None
 
 
 @dataclass
@@ -96,6 +100,308 @@ def check_http(url: str, timeout: float = 5.0) -> tuple[Status, str]:
         return "down", str(exc)
 
 
+def _parse_host_port(target: str, default_port: int) -> tuple[str, int]:
+    if target.startswith("socket:"):
+        return target, default_port
+
+    host = "127.0.0.1"
+    port = default_port
+    if ":" in target:
+        host_part, port_part = target.rsplit(":", 1)
+        host = host_part or "127.0.0.1"
+        try:
+            port = int(port_part)
+        except ValueError:
+            port = default_port
+    return host, port
+
+
+def _run_command(cmd: list[str], timeout: float = 5.0) -> tuple[Status, str]:
+    try:
+        result = subprocess.run(
+            cmd,
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+        )
+        output = (result.stdout or result.stderr or "").strip()
+        if result.returncode == 0:
+            return "up", output or "ok"
+        return "down", output or f"exit {result.returncode}"
+    except FileNotFoundError:
+        return "unknown", f"command not found: {cmd[0]}"
+    except subprocess.TimeoutExpired:
+        return "down", "timeout"
+    except Exception as exc:  # noqa: BLE001
+        return "unknown", str(exc)
+
+
+def _split_db_target(target: str) -> tuple[str, str | None]:
+    if "#" not in target:
+        return target, None
+    connection, database = target.rsplit("#", 1)
+    return connection, database or None
+
+
+def _mysql_auth_args(db_user: str | None, db_password: str | None) -> list[str]:
+    args: list[str] = []
+    if db_user:
+        args.extend(["-u", db_user])
+    if db_password:
+        args.append(f"-p{db_password}")
+    return args
+
+
+def check_mysql(
+    target: str,
+    db_user: str | None = None,
+    db_password: str | None = None,
+) -> tuple[Status, str]:
+    connection, database_name = _split_db_target(target)
+
+    if connection.startswith("socket:"):
+        socket_path = connection[7:]
+        status, message = _run_command(
+            [
+                "mysqladmin",
+                *_mysql_defaults_file(),
+                *_mysql_auth_args(db_user, db_password),
+                "ping",
+                f"--socket={socket_path}",
+            ]
+        )
+        if status == "unknown":
+            status, message = _run_command(
+                ["mysqladmin", "ping", f"--socket={socket_path}"],
+            )
+    else:
+        host, port = _parse_host_port(connection, 3306)
+        status, message = _run_command(
+            [
+                "mysqladmin",
+                *_mysql_defaults_file(),
+                *_mysql_auth_args(db_user, db_password),
+                "ping",
+                "-h",
+                host,
+                "-P",
+                str(port),
+            ]
+        )
+        if status == "unknown":
+            status, message = _run_command(["mysqladmin", "ping", "-h", host, "-P", str(port)])
+
+    if status != "up":
+        if status != "unknown":
+            return status, message
+        host, port = _parse_host_port(connection, 3306)
+        tcp_status, tcp_message = check_tcp(f"{host}:{port}")
+        if tcp_status != "up":
+            return tcp_status, tcp_message
+
+    if not database_name:
+        return "up", message
+
+    try:
+        lines = _run_lines(
+            [
+                "mysql",
+                *_mysql_defaults_file(),
+                *_mysql_conn_args_for_check(connection),
+                *_mysql_auth_args(db_user, db_password),
+                "-N",
+                "-B",
+                "-e",
+                f"SELECT SCHEMA_NAME FROM information_schema.SCHEMATA WHERE SCHEMA_NAME = '{database_name}'",
+            ]
+        )
+        if any(line == database_name for line in lines):
+            return "up", f"database {database_name} accessible"
+        return "down", f"database {database_name} not found"
+    except RuntimeError as exc:
+        return "down", str(exc)
+
+
+def _mysql_defaults_file() -> list[str]:
+    cnf = Path("/etc/mysql/debian.cnf")
+    if cnf.exists():
+        return [f"--defaults-extra-file={cnf}"]
+    return []
+
+
+def _mysql_conn_args_for_check(connection: str) -> list[str]:
+    if connection.startswith("socket:"):
+        return [f"--socket={connection[7:]}"]
+    host, port = _parse_host_port(connection, 3306)
+    return [f"--host={host}", f"--port={port}"]
+
+
+def _run_lines(cmd: list[str], timeout: float = 10.0) -> list[str]:
+    result = subprocess.run(
+        cmd,
+        capture_output=True,
+        text=True,
+        timeout=timeout,
+        check=False,
+    )
+    if result.returncode != 0:
+        output = (result.stderr or result.stdout or "").strip()
+        raise RuntimeError(output or f"command failed: {cmd[0]}")
+    return [line.strip() for line in result.stdout.splitlines() if line.strip()]
+
+
+def check_postgres(
+    target: str,
+    db_user: str | None = None,
+    db_password: str | None = None,
+) -> tuple[Status, str]:
+    connection, database_name = _split_db_target(target)
+
+    pg_env = None
+    auth_args: list[str] = []
+    if db_user:
+        auth_args.extend(["-U", db_user])
+    if db_password:
+        pg_env = {**os.environ, "PGPASSWORD": db_password}
+
+    if connection.startswith("socket:"):
+        socket_dir = connection[7:].rsplit("/", 1)[0]
+        cmd = ["pg_isready", "-h", socket_dir, *auth_args]
+    else:
+        host, port = _parse_host_port(connection, 5432)
+        cmd = ["pg_isready", "-h", host, "-p", str(port), *auth_args]
+
+    try:
+        result = subprocess.run(
+            cmd,
+            capture_output=True,
+            text=True,
+            timeout=5,
+            check=False,
+            env=pg_env,
+        )
+        ready = result.returncode == 0
+        message = (result.stdout or result.stderr or "").strip()
+    except FileNotFoundError:
+        return "unknown", "pg_isready not found"
+
+    if not ready:
+        host, port = _parse_host_port(connection, 5432)
+        return check_tcp(f"{host}:{port}")
+
+    if not database_name:
+        return "up", message or "ready"
+
+    if connection.startswith("socket:"):
+        host = connection[7:].rsplit("/", 1)[0]
+        port = 5432
+    else:
+        host, port = _parse_host_port(connection, 5432)
+
+    verify_cmd = ["psql", "-h", host, "-p", str(port), *auth_args, "-t", "-A", "-c", "SELECT 1"]
+    if database_name:
+        verify_cmd.extend(["-d", database_name])
+
+    try:
+        result = subprocess.run(
+            verify_cmd,
+            capture_output=True,
+            text=True,
+            timeout=8,
+            check=False,
+            env=pg_env,
+        )
+        if result.returncode == 0:
+            return "up", f"database {database_name} accessible"
+        output = (result.stderr or result.stdout or "").strip()
+        return "down", output or f"database {database_name} unreachable"
+    except FileNotFoundError:
+        return "up", message or "ready"
+
+
+def check_redis(target: str, db_user: str | None = None, db_password: str | None = None) -> tuple[Status, str]:
+    connection, database_name = _split_db_target(target)
+    auth: list[str] = []
+    if db_password:
+        auth = ["-a", db_password]
+
+    if connection.startswith("socket:"):
+        socket_path = connection[7:]
+        base = ["redis-cli", "-s", socket_path, *auth]
+    else:
+        host, port = _parse_host_port(connection, 6379)
+        base = ["redis-cli", "-h", host, "-p", str(port), *auth]
+
+    status, message = _run_command([*base, "ping"])
+    if status == "up" and "PONG" not in message.upper():
+        status = "down"
+
+    if status != "up":
+        if status != "unknown":
+            return status, message
+        host, port = _parse_host_port(connection, 6379)
+        return check_tcp(f"{host}:{port}")
+
+    if database_name is None:
+        return status, message
+
+    select_status, select_message = _run_command([*base, "-n", database_name, "ping"])
+    if select_status == "up" and "PONG" in select_message.upper():
+        return "up", f"redis db {database_name} ok"
+    return select_status, select_message
+
+
+def check_mongodb(
+    target: str,
+    db_user: str | None = None,
+    db_password: str | None = None,
+) -> tuple[Status, str]:
+    connection, database_name = _split_db_target(target)
+    host, port = _parse_host_port(connection, 27017)
+
+    auth_args: list[str] = []
+    if db_user:
+        auth_args.extend(["-u", db_user])
+    if db_password:
+        auth_args.extend(["-p", db_password])
+
+    for cmd in (
+        ["mongosh", "--quiet", "--eval", "db.runCommand({ ping: 1 }).ok"],
+        ["mongo", "--quiet", "--eval", "db.runCommand({ ping: 1 }).ok"],
+    ):
+        status, message = _run_command(
+            [*cmd, "--host", host, "--port", str(port), *auth_args],
+            timeout=8.0,
+        )
+        if status == "up" and message.strip() == "1":
+            if not database_name:
+                return "up", "ping ok"
+            list_status, list_message = _run_command(
+                [
+                    cmd[0],
+                    "--quiet",
+                    "--host",
+                    host,
+                    "--port",
+                    str(port),
+                    *auth_args,
+                    "--eval",
+                    f"db.getSiblingDB('{database_name}').getName()",
+                ],
+                timeout=8.0,
+            )
+            if list_status == "up" and database_name in list_message:
+                return "up", f"database {database_name} accessible"
+            return "down", f"database {database_name} not found"
+        if status != "unknown":
+            continue
+
+    tcp_status, tcp_message = check_tcp(f"{host}:{port}")
+    if tcp_status == "up" and not database_name:
+        return "up", f"tcp open ({tcp_message})"
+    return tcp_status, tcp_message
+
+
 def run_check(service: ServiceCheck) -> CheckResult:
     started = time.perf_counter()
     check_type = service.check_type.lower()
@@ -107,6 +413,14 @@ def run_check(service: ServiceCheck) -> CheckResult:
         status, message = check_tcp(service.target)
     elif check_type == "http":
         status, message = check_http(service.target)
+    elif check_type == "mysql":
+        status, message = check_mysql(service.target, service.db_user, service.db_password)
+    elif check_type == "postgres":
+        status, message = check_postgres(service.target, service.db_user, service.db_password)
+    elif check_type == "redis":
+        status, message = check_redis(service.target, service.db_user, service.db_password)
+    elif check_type == "mongodb":
+        status, message = check_mongodb(service.target, service.db_user, service.db_password)
     else:
         status, message = "unknown", f"unsupported check type: {service.check_type}"
 

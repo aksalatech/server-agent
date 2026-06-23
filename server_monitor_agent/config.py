@@ -33,7 +33,16 @@ def _parse_service(item: dict[str, Any]) -> ServiceCheck | None:
     if item.get("enabled") is False:
         return None
 
-    return ServiceCheck(name=name, check_type=check_type, target=target)
+    db_user = str(item.get("db_user") or item.get("dbUser") or "").strip() or None
+    db_password = str(item.get("db_password") or item.get("dbPassword") or "").strip() or None
+
+    return ServiceCheck(
+        name=name,
+        check_type=check_type,
+        target=target,
+        db_user=db_user,
+        db_password=db_password,
+    )
 
 
 def load_local_config(path: Path | None = None) -> AgentConfig:

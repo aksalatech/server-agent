@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import socket
+from pathlib import Path
 from typing import Any
 
 import requests
@@ -78,6 +79,69 @@ class AgentClient:
         )
         response.raise_for_status()
         return response.json()
+
+    def send_databases_report(
+        self, databases: list[dict[str, Any]], error: str = ""
+    ) -> dict[str, Any]:
+        payload: dict[str, Any] = {"databases": databases}
+        if error:
+            payload["error"] = error
+
+        response = self.session.post(
+            f"{self.server_url}/api/agent/v1/databases-report",
+            json=payload,
+            timeout=self.timeout,
+        )
+        response.raise_for_status()
+        return response.json()
+
+    def report_backup_job(
+        self,
+        job_id: int,
+        status: str,
+        message: str = "",
+        file_path: Path | None = None,
+    ) -> dict[str, Any]:
+        data = {
+            "job_id": str(job_id),
+            "status": status,
+            "message": message,
+        }
+
+        files = None
+        if file_path is not None:
+            files = {
+                "file": (
+                    file_path.name,
+                    file_path.open("rb"),
+                    "application/octet-stream",
+                )
+            }
+
+        response = self.session.post(
+            f"{self.server_url}/api/agent/v1/backup-job",
+            data=data,
+            files=files,
+            timeout=max(self.timeout, 300),
+        )
+        if files:
+            files["file"][1].close()
+        response.raise_for_status()
+        return response.json()
+
+    def download_backup_for_restore(self, job_id: int, destination: Path) -> None:
+        response = self.session.get(
+            f"{self.server_url}/api/agent/v1/backup-job",
+            params={"job_id": job_id},
+            timeout=max(self.timeout, 300),
+            stream=True,
+        )
+        response.raise_for_status()
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        with destination.open("wb") as handle:
+            for chunk in response.iter_content(chunk_size=1024 * 1024):
+                if chunk:
+                    handle.write(chunk)
 
 
 def _detect_ip() -> str:

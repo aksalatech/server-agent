@@ -18,6 +18,8 @@ from .config import (
 )
 from .detect import detect_services, services_to_yaml_items
 from .domains import detect_domains
+from .databases import detect_databases
+from .backup import BACKUP_WORK_DIR, backup_database, restore_database
 
 logging.basicConfig(
     level=logging.INFO,
@@ -133,6 +135,81 @@ def _report_detected_domains(client: AgentClient) -> None:
         logger.error("Gagal mengirim laporan deteksi domain: %s", exc)
 
 
+def _report_detected_databases(client: AgentClient) -> None:
+    try:
+        detected = detect_databases()
+        payload = []
+        for item in detected:
+            payload.append(
+                {
+                    "name": str(item["name"]),
+                    "database": str(item.get("database") or item["name"]),
+                    "engine": str(item["engine"]),
+                    "source": str(item["source"]),
+                    "type": str(item["type"]),
+                    "connection": str(item.get("connection") or item["target"]),
+                    "target": str(item["target"]),
+                }
+            )
+
+        error = ""
+        if not payload:
+            error = "Tidak ada database yang aktif dan merespons di host ini"
+
+        client.send_databases_report(payload, error=error)
+        logger.info("Laporan deteksi database terkirim (%d database)", len(payload))
+    except Exception as exc:  # noqa: BLE001
+        logger.error("Gagal mengirim laporan deteksi database: %s", exc)
+
+
+def _process_backup_jobs(client: AgentClient, remote_payload: dict) -> None:
+    jobs = remote_payload.get("backup_jobs") or []
+    if not isinstance(jobs, list) or not jobs:
+        return
+
+    job = jobs[0]
+    if not isinstance(job, dict):
+        return
+
+    job_id = int(job.get("id") or 0)
+    if not job_id:
+        return
+
+    job_type = str(job.get("job_type") or "backup")
+    engine = str(job.get("engine") or "")
+    target = str(job.get("target") or "")
+    database_name = job.get("database_name")
+    db_name = str(database_name).strip() if isinstance(database_name, str) and database_name.strip() else None
+    filename = str(job.get("filename") or f"backup-{job_id}.bin")
+
+    BACKUP_WORK_DIR.mkdir(parents=True, exist_ok=True)
+    work_file = BACKUP_WORK_DIR / filename
+
+    try:
+        client.report_backup_job(job_id, "running", "Memproses job...")
+        logger.info("Memproses job %s (%s)", job_id, job_type)
+
+        if job_type == "restore":
+            client.download_backup_for_restore(job_id, work_file)
+            restore_database(engine, target, db_name, work_file)
+            client.report_backup_job(job_id, "completed", "Restore selesai")
+            logger.info("Restore job %s selesai", job_id)
+            return
+
+        backup_database(engine, target, db_name, work_file)
+        client.report_backup_job(job_id, "completed", "Backup selesai", file_path=work_file)
+        logger.info("Backup job %s selesai", job_id)
+    except Exception as exc:  # noqa: BLE001
+        logger.error("Job backup/restore %s gagal: %s", job_id, exc)
+        try:
+            client.report_backup_job(job_id, "failed", str(exc))
+        except Exception as report_exc:  # noqa: BLE001
+            logger.error("Gagal melaporkan kegagalan job %s: %s", job_id, report_exc)
+    finally:
+        if work_file.exists():
+            work_file.unlink(missing_ok=True)
+
+
 def cmd_run(config_path: Path | None = None, once: bool = False) -> int:
     creds = load_credentials()
     api_key = creds.get("api_key", "")
@@ -152,6 +229,9 @@ def cmd_run(config_path: Path | None = None, once: bool = False) -> int:
                 _report_detected_services(client)
             if remote_payload.get("detect_domains_requested"):
                 _report_detected_domains(client)
+            if remote_payload.get("detect_databases_requested"):
+                _report_detected_databases(client)
+            _process_backup_jobs(client, remote_payload)
 
             remote_services = parse_remote_services(remote_payload)
             interval = int(remote_payload.get("interval_seconds") or local.interval_seconds)
