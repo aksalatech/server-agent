@@ -38,17 +38,25 @@ class AgentClient:
         response.raise_for_status()
         return response.json()
 
-    def send_heartbeat(self, services: list[dict[str, Any]]) -> dict[str, Any]:
+    def send_heartbeat(
+        self,
+        services: list[dict[str, Any]],
+        system_metrics: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
         hostname = socket.gethostname()
         ip_address = _detect_ip()
 
+        payload: dict[str, Any] = {
+            "hostname": hostname,
+            "ip_address": ip_address,
+            "services": services,
+        }
+        if system_metrics:
+            payload["system_metrics"] = system_metrics
+
         response = self.session.post(
             f"{self.server_url}/api/agent/v1/heartbeat",
-            json={
-                "hostname": hostname,
-                "ip_address": ip_address,
-                "services": services,
-            },
+            json=payload,
             timeout=self.timeout,
         )
         response.raise_for_status()

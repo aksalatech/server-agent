@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import shutil
 import socket
 import ssl
 import subprocess
@@ -102,7 +103,7 @@ def check_http(url: str, timeout: float = 5.0) -> tuple[Status, str]:
 
 def _parse_host_port(target: str, default_port: int) -> tuple[str, int]:
     if target.startswith("socket:"):
-        return target, default_port
+        return target, _postgres_port_from_socket(target[7:])
 
     host = "127.0.0.1"
     port = default_port
@@ -114,6 +115,47 @@ def _parse_host_port(target: str, default_port: int) -> tuple[str, int]:
         except ValueError:
             port = default_port
     return host, port
+
+
+def _postgres_port_from_socket(socket_path: str) -> int:
+    if ".s.PGSQL." in socket_path:
+        try:
+            return int(socket_path.split(".s.PGSQL.")[-1])
+        except ValueError:
+            pass
+    return 5432
+
+
+def _postgres_psql_host_port(connection: str) -> tuple[str, int]:
+    if connection.startswith("socket:"):
+        socket_file = connection[7:]
+        return socket_file.rsplit("/", 1)[0], _postgres_port_from_socket(socket_file)
+    return _parse_host_port(connection, 5432)
+
+
+def _postgres_run_as_db_user(cmd: list[str]) -> list[str]:
+    if os.geteuid() != 0:
+        return cmd
+    if shutil.which("runuser"):
+        return ["runuser", "-u", "postgres", "--", *cmd]
+    if shutil.which("sudo"):
+        return ["sudo", "-u", "postgres", *cmd]
+    return cmd
+
+
+def build_postgres_psql_cmd(
+    connection: str,
+    extra_args: list[str],
+    db_user: str | None = None,
+) -> list[str]:
+    host, port = _postgres_psql_host_port(connection)
+    cmd = ["psql", "-h", host, "-p", str(port)]
+    if db_user:
+        cmd.extend(["-U", db_user])
+    cmd.extend(extra_args)
+    if not db_user:
+        return _postgres_run_as_db_user(cmd)
+    return cmd
 
 
 def _run_command(cmd: list[str], timeout: float = 5.0) -> tuple[Status, str]:
@@ -266,7 +308,8 @@ def check_postgres(
 
     if connection.startswith("socket:"):
         socket_dir = connection[7:].rsplit("/", 1)[0]
-        cmd = ["pg_isready", "-h", socket_dir, *auth_args]
+        port = _postgres_port_from_socket(connection[7:])
+        cmd = ["pg_isready", "-h", socket_dir, "-p", str(port), *auth_args]
     else:
         host, port = _parse_host_port(connection, 5432)
         cmd = ["pg_isready", "-h", host, "-p", str(port), *auth_args]
@@ -286,21 +329,19 @@ def check_postgres(
         return "unknown", "pg_isready not found"
 
     if not ready:
+        if connection.startswith("socket:"):
+            return "down", message or "postgres socket not ready"
         host, port = _parse_host_port(connection, 5432)
         return check_tcp(f"{host}:{port}")
 
     if not database_name:
         return "up", message or "ready"
 
-    if connection.startswith("socket:"):
-        host = connection[7:].rsplit("/", 1)[0]
-        port = 5432
-    else:
-        host, port = _parse_host_port(connection, 5432)
-
-    verify_cmd = ["psql", "-h", host, "-p", str(port), *auth_args, "-t", "-A", "-c", "SELECT 1"]
-    if database_name:
-        verify_cmd.extend(["-d", database_name])
+    verify_cmd = build_postgres_psql_cmd(
+        connection,
+        ["-t", "-A", "-c", "SELECT 1", *(["-d", database_name] if database_name else [])],
+        db_user=db_user,
+    )
 
     try:
         result = subprocess.run(

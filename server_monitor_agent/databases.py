@@ -6,6 +6,7 @@ from typing import Callable
 
 from .checker import (
     Status,
+    build_postgres_psql_cmd,
     check_mongodb,
     check_mysql,
     check_postgres,
@@ -90,9 +91,9 @@ def _candidate_targets(engine: str, port: int) -> list[str]:
         ]
     if engine == "postgres":
         return [
-            f"127.0.0.1:{port}",
             "socket:/var/run/postgresql/.s.PGSQL.5432",
             "socket:/run/postgresql/.s.PGSQL.5432",
+            f"127.0.0.1:{port}",
         ]
     if engine == "redis":
         return [
@@ -167,31 +168,94 @@ def _list_mysql_databases(connection: str) -> list[str]:
     return [line for line in lines if line.lower() not in MYSQL_SKIP_DATABASES]
 
 
-def _list_postgres_databases(connection: str) -> list[str]:
-    host = "127.0.0.1"
-    port = 5432
-    if connection.startswith("socket:"):
-        host = connection[7:].rsplit("/", 1)[0]
-    elif ":" in connection:
-        host_part, port_part = connection.rsplit(":", 1)
-        host = host_part or "127.0.0.1"
-        try:
-            port = int(port_part)
-        except ValueError:
-            port = 5432
+def _discover_postgres_clusters() -> list[dict[str, str | int | list[str]]]:
+    clusters: list[dict[str, str | int | list[str]]] = []
+    try:
+        result = subprocess.run(
+            ["pg_lsclusters", "--no-header"],
+            capture_output=True,
+            text=True,
+            timeout=10,
+            check=False,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        result = None
 
+    if result is not None and result.returncode == 0:
+        for line in result.stdout.splitlines():
+            line = line.strip()
+            if not line:
+                continue
+            parts = line.split()
+            if len(parts) < 4:
+                continue
+            version, cluster, port_str, status = parts[0], parts[1], parts[2], parts[3]
+            if status.lower() != "online":
+                continue
+            try:
+                port = int(port_str)
+            except ValueError:
+                continue
+
+            unit = f"postgresql@{version}-{cluster}"
+            name = f"postgresql-{version}-{cluster}"
+            targets = [
+                f"socket:/var/run/postgresql/.s.PGSQL.{port}",
+                f"socket:/run/postgresql/.s.PGSQL.{port}",
+                f"127.0.0.1:{port}",
+            ]
+            clusters.append(
+                {
+                    "name": name,
+                    "engine": "postgres",
+                    "port": port,
+                    "systemd_unit": unit,
+                    "targets": targets,
+                }
+            )
+
+    if clusters:
+        return clusters
+
+    # Fallback: scan socket directory when pg_lsclusters unavailable.
+    seen_ports: set[int] = set()
+    for base in (Path("/var/run/postgresql"), Path("/run/postgresql")):
+        if not base.is_dir():
+            continue
+        for sock in sorted(base.glob(".s.PGSQL.*")):
+            try:
+                port = int(sock.name.split(".s.PGSQL.")[-1])
+            except ValueError:
+                continue
+            if port in seen_ports:
+                continue
+            seen_ports.add(port)
+            clusters.append(
+                {
+                    "name": f"postgresql-{port}",
+                    "engine": "postgres",
+                    "port": port,
+                    "systemd_unit": "postgresql",
+                    "targets": [
+                        f"127.0.0.1:{port}",
+                        f"socket:{sock}",
+                    ],
+                }
+            )
+    return clusters
+
+
+def _list_postgres_databases(connection: str) -> list[str]:
     lines = _run_lines(
-        [
-            "psql",
-            "-h",
-            host,
-            "-p",
-            str(port),
-            "-t",
-            "-A",
-            "-c",
-            "SELECT datname FROM pg_database WHERE datistemplate = false ORDER BY datname",
-        ]
+        build_postgres_psql_cmd(
+            connection,
+            [
+                "-t",
+                "-A",
+                "-c",
+                "SELECT datname FROM pg_database WHERE datistemplate = false ORDER BY datname",
+            ],
+        )
     )
     return [line for line in lines if line.lower() not in POSTGRES_SKIP_DATABASES]
 
@@ -271,11 +335,89 @@ def _list_databases_for_engine(engine: str, connection: str) -> list[str]:
     return []
 
 
+def _process_database_instance(
+    results: list[dict[str, str]],
+    seen_keys: set[str],
+    seen_instances: set[str],
+    instance_name: str,
+    engine: str,
+    systemd_unit: str,
+    candidate_targets: list[str],
+) -> None:
+    if instance_name in seen_instances:
+        return
+
+    service_status, _ = check_systemd(systemd_unit)
+    if service_status != "up":
+        return
+
+    working_connection = ""
+    for target in candidate_targets:
+        probe_status, _ = _probe_engine(engine, target)
+        if probe_status == "up":
+            working_connection = target
+            break
+
+    if not working_connection:
+        return
+
+    seen_instances.add(instance_name)
+
+    try:
+        database_names = _list_databases_for_engine(engine, working_connection)
+    except RuntimeError as exc:
+        database_names = []
+        results.append(
+            {
+                "name": f"_error_{instance_name}",
+                "engine": engine,
+                "source": instance_name,
+                "type": engine,
+                "connection": working_connection,
+                "target": working_connection,
+                "error": str(exc),
+            }
+        )
+
+    for database_name in database_names:
+        unique_key = f"{instance_name}:{database_name}"
+        if unique_key in seen_keys:
+            continue
+
+        service_name = database_name
+        if engine == "redis":
+            service_name = f"redis-db{database_name}"
+
+        results.append(
+            {
+                "name": service_name,
+                "database": database_name,
+                "engine": engine,
+                "source": instance_name,
+                "type": engine,
+                "connection": working_connection,
+                "target": _build_target(working_connection, database_name),
+            }
+        )
+        seen_keys.add(unique_key)
+
+
 def detect_databases() -> list[dict[str, str]]:
     enabled = _enabled_units()
     results: list[dict[str, str]] = []
     seen_keys: set[str] = set()
     seen_instances: set[str] = set()
+
+    for cluster in _discover_postgres_clusters():
+        _process_database_instance(
+            results,
+            seen_keys,
+            seen_instances,
+            str(cluster["name"]),
+            "postgres",
+            str(cluster["systemd_unit"]),
+            list(cluster["targets"]),
+        )
 
     for unit in sorted(enabled):
         definition = DATABASE_DEFINITIONS.get(unit)
@@ -286,64 +428,19 @@ def detect_databases() -> list[dict[str, str]]:
         if instance_name in seen_instances:
             continue
 
-        systemd_unit = str(definition["systemd_unit"])
-        service_status, _ = check_systemd(systemd_unit)
-        if service_status != "up":
-            continue
-
         engine = str(definition["engine"])
-        port = int(definition["port"])
-        working_connection = ""
-
-        for target in _candidate_targets(engine, port):
-            probe_status, _ = _probe_engine(engine, target)
-            if probe_status == "up":
-                working_connection = target
-                break
-
-        if not working_connection:
+        if engine == "postgres":
             continue
-
-        seen_instances.add(instance_name)
-
-        try:
-            database_names = _list_databases_for_engine(engine, working_connection)
-        except RuntimeError as exc:
-            database_names = []
-            if not results:
-                results.append(
-                    {
-                        "name": f"_error_{instance_name}",
-                        "engine": engine,
-                        "source": instance_name,
-                        "type": engine,
-                        "connection": working_connection,
-                        "target": working_connection,
-                        "error": str(exc),
-                    }
-                )
-
-        for database_name in database_names:
-            unique_key = f"{instance_name}:{database_name}"
-            if unique_key in seen_keys:
-                continue
-
-            service_name = database_name
-            if engine == "redis":
-                service_name = f"redis-db{database_name}"
-
-            results.append(
-                {
-                    "name": service_name,
-                    "database": database_name,
-                    "engine": engine,
-                    "source": instance_name,
-                    "type": engine,
-                    "connection": working_connection,
-                    "target": _build_target(working_connection, database_name),
-                }
-            )
-            seen_keys.add(unique_key)
+        port = int(definition["port"])
+        _process_database_instance(
+            results,
+            seen_keys,
+            seen_instances,
+            instance_name,
+            engine,
+            str(definition["systemd_unit"]),
+            _candidate_targets(engine, port),
+        )
 
     filtered = [item for item in results if not item.get("name", "").startswith("_error_")]
     return filtered

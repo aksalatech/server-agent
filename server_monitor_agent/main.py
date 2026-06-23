@@ -19,6 +19,7 @@ from .config import (
 from .detect import detect_services, services_to_yaml_items
 from .domains import detect_domains
 from .databases import detect_databases
+from .metrics import collect_system_metrics
 from .backup import BACKUP_WORK_DIR, backup_database, restore_database
 
 logging.basicConfig(
@@ -252,7 +253,7 @@ def cmd_run(config_path: Path | None = None, once: bool = False) -> int:
                 for r in results
             ]
 
-            response = client.send_heartbeat(payload)
+            response = client.send_heartbeat(payload, system_metrics=collect_system_metrics())
             logger.info(
                 "Heartbeat terkirim (%s services, host_id=%s)",
                 len(payload),
