@@ -12,7 +12,6 @@ from .config import (
     CONFIG_FILE,
     load_credentials,
     load_local_config,
-    merge_services,
     parse_remote_services,
     save_credentials,
     write_local_config,
@@ -127,10 +126,11 @@ def cmd_run(config_path: Path | None = None, once: bool = False) -> int:
 
             remote_services = parse_remote_services(remote_payload)
             interval = int(remote_payload.get("interval_seconds") or local.interval_seconds)
-            services = merge_services(local.services, remote_services)
+            # Hanya pantau service yang dikonfigurasi di dashboard (database).
+            services = remote_services
 
             if not services:
-                logger.warning("Tidak ada service yang dikonfigurasi")
+                logger.warning("Tidak ada service dikonfigurasi di dashboard")
 
             results = run_checks(services)
             payload = [

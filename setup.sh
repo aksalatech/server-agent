@@ -9,7 +9,7 @@ CLONE_DIR=""
 
 SERVER_URL=""
 TOKEN=""
-NO_DETECT=false
+NO_DETECT=true
 
 usage() {
   cat <<'EOF'
@@ -20,7 +20,7 @@ Setup lengkap agent dalam satu perintah: install, konfigurasi, registrasi, dan s
 Options:
   --server-url URL   URL server monitoring (wajib)
   --token TOKEN      Registration token dari dashboard (wajib)
-  --no-detect        Lewati auto-detect layanan systemd
+  --no-detect        Lewati auto-detect layanan systemd (default: aktif)
   --repo-url URL     URL git repo agent (default: aksalatech/server-agent)
   -h, --help         Tampilkan bantuan ini
 

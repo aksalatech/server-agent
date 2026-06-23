@@ -3,6 +3,8 @@ from __future__ import annotations
 import subprocess
 from typing import Any
 
+from .checker import check_tcp
+
 # systemd unit name -> (display name, check type, target)
 KNOWN_UNITS: dict[str, tuple[str, str, str]] = {
     "nginx": ("nginx", "systemd", "nginx"),
@@ -77,6 +79,11 @@ def detect_services() -> list[dict[str, str]]:
             continue
         tcp_name, tcp_target = TCP_BY_UNIT[unit]
         if tcp_name in seen_names:
+            continue
+        # Hanya tambahkan cek TCP jika port benar-benar menerima koneksi.
+        # Banyak MariaDB/PostgreSQL hanya listen via Unix socket, bukan TCP localhost.
+        status, _ = check_tcp(tcp_target)
+        if status != "up":
             continue
         services.append({"name": tcp_name, "type": "tcp", "target": tcp_target})
         seen_names.add(tcp_name)
