@@ -62,6 +62,24 @@ class AgentClient:
         response.raise_for_status()
         return response.json()
 
+    def report_restart_job(
+        self,
+        job_id: int,
+        status: str,
+        message: str = "",
+    ) -> dict[str, Any]:
+        response = self.session.post(
+            f"{self.server_url}/api/agent/v1/restart-job",
+            json={
+                "job_id": str(job_id),
+                "status": status,
+                "message": message,
+            },
+            timeout=self.timeout,
+        )
+        response.raise_for_status()
+        return response.json()
+
     def send_detect_report(self, services: list[dict[str, Any]], error: str = "") -> dict[str, Any]:
         payload: dict[str, Any] = {"services": services}
         if error:

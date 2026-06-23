@@ -21,6 +21,7 @@ from .domains import detect_domains
 from .databases import detect_databases
 from .metrics import collect_system_metrics
 from .backup import BACKUP_WORK_DIR, backup_database, restore_database
+from .restart import restart_systemd_unit
 
 logging.basicConfig(
     level=logging.INFO,
@@ -163,6 +164,36 @@ def _report_detected_databases(client: AgentClient) -> None:
         logger.error("Gagal mengirim laporan deteksi database: %s", exc)
 
 
+def _process_restart_jobs(client: AgentClient, remote_payload: dict) -> None:
+    jobs = remote_payload.get("restart_jobs") or []
+    if not isinstance(jobs, list) or not jobs:
+        return
+
+    job = jobs[0]
+    if not isinstance(job, dict):
+        return
+
+    job_id = int(job.get("id") or 0)
+    if not job_id:
+        return
+
+    unit = str(job.get("unit") or "").strip()
+    service_name = str(job.get("service_name") or unit)
+
+    try:
+        client.report_restart_job(job_id, "running", f"Merestart {unit}...")
+        logger.info("Memproses restart job %s (%s)", job_id, unit)
+        message = restart_systemd_unit(unit)
+        client.report_restart_job(job_id, "completed", message)
+        logger.info("Restart job %s selesai: %s", job_id, service_name)
+    except Exception as exc:  # noqa: BLE001
+        logger.error("Restart job %s gagal: %s", job_id, exc)
+        try:
+            client.report_restart_job(job_id, "failed", str(exc))
+        except Exception as report_exc:  # noqa: BLE001
+            logger.error("Gagal melaporkan kegagalan restart %s: %s", job_id, report_exc)
+
+
 def _process_backup_jobs(client: AgentClient, remote_payload: dict) -> None:
     jobs = remote_payload.get("backup_jobs") or []
     if not isinstance(jobs, list) or not jobs:
@@ -233,6 +264,7 @@ def cmd_run(config_path: Path | None = None, once: bool = False) -> int:
             if remote_payload.get("detect_databases_requested"):
                 _report_detected_databases(client)
             _process_backup_jobs(client, remote_payload)
+            _process_restart_jobs(client, remote_payload)
 
             remote_services = parse_remote_services(remote_payload)
             interval = int(remote_payload.get("interval_seconds") or local.interval_seconds)
