@@ -80,6 +80,33 @@ def cmd_detect(config_path: Path | None = None, write: bool = False) -> int:
     return 0
 
 
+def _report_detected_services(client: AgentClient) -> None:
+    try:
+        detected = detect_services()
+        items = services_to_yaml_items(detected)
+        payload = []
+        for item in items:
+            entry: dict[str, str] = {
+                "name": str(item["name"]),
+                "type": str(item["type"]),
+            }
+            if item.get("type") == "systemd":
+                entry["unit"] = str(item.get("unit") or item["name"])
+                entry["target"] = entry["unit"]
+            else:
+                entry["target"] = str(item.get("target") or item["name"])
+            payload.append(entry)
+
+        error = ""
+        if not payload:
+            error = "Tidak ada layanan dikenal yang terdeteksi"
+
+        client.send_detect_report(payload, error=error)
+        logger.info("Laporan deteksi service terkirim (%d service)", len(payload))
+    except Exception as exc:  # noqa: BLE001
+        logger.error("Gagal mengirim laporan deteksi: %s", exc)
+
+
 def cmd_run(config_path: Path | None = None, once: bool = False) -> int:
     creds = load_credentials()
     api_key = creds.get("api_key", "")
@@ -95,6 +122,9 @@ def cmd_run(config_path: Path | None = None, once: bool = False) -> int:
     while True:
         try:
             remote_payload = client.fetch_config()
+            if remote_payload.get("detect_requested"):
+                _report_detected_services(client)
+
             remote_services = parse_remote_services(remote_payload)
             interval = int(remote_payload.get("interval_seconds") or local.interval_seconds)
             services = merge_services(local.services, remote_services)

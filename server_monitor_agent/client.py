@@ -53,6 +53,19 @@ class AgentClient:
         response.raise_for_status()
         return response.json()
 
+    def send_detect_report(self, services: list[dict[str, Any]], error: str = "") -> dict[str, Any]:
+        payload: dict[str, Any] = {"services": services}
+        if error:
+            payload["error"] = error
+
+        response = self.session.post(
+            f"{self.server_url}/api/agent/v1/detect-report",
+            json=payload,
+            timeout=self.timeout,
+        )
+        response.raise_for_status()
+        return response.json()
+
 
 def _detect_ip() -> str:
     try:
