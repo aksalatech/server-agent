@@ -147,10 +147,13 @@ class AgentClient:
                 )
             }
 
+        # Session default is application/json; clear it so requests can send
+        # multipart (with file) or x-www-form-urlencoded (status-only).
         response = self.session.post(
             f"{self.server_url}/api/agent/v1/backup-job",
             data=data,
             files=files,
+            headers={"Content-Type": None},
             timeout=max(self.timeout, 300),
         )
         if files:
