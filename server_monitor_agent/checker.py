@@ -1,8 +1,11 @@
 from __future__ import annotations
 
 import socket
+import ssl
 import subprocess
 import time
+import urllib.error
+import urllib.request
 from dataclasses import dataclass
 from typing import Literal
 
@@ -68,6 +71,31 @@ def check_tcp(target: str, timeout: float = 3.0) -> tuple[Status, str]:
         return "down", str(exc)
 
 
+def check_http(url: str, timeout: float = 5.0) -> tuple[Status, str]:
+    target = url.strip()
+    if not target.startswith("http://") and not target.startswith("https://"):
+        target = f"https://{target}"
+
+    try:
+        context = ssl.create_default_context()
+        request = urllib.request.Request(
+            target,
+            method="GET",
+            headers={"User-Agent": "ServerMonitorAgent/1.0"},
+        )
+        with urllib.request.urlopen(request, timeout=timeout, context=context) as response:
+            code = response.getcode()
+            if 200 <= code < 400:
+                return "up", f"HTTP {code}"
+            return "down", f"HTTP {code}"
+    except urllib.error.HTTPError as exc:
+        if 200 <= exc.code < 400:
+            return "up", f"HTTP {exc.code}"
+        return "down", f"HTTP {exc.code}"
+    except Exception as exc:  # noqa: BLE001
+        return "down", str(exc)
+
+
 def run_check(service: ServiceCheck) -> CheckResult:
     started = time.perf_counter()
     check_type = service.check_type.lower()
@@ -77,6 +105,8 @@ def run_check(service: ServiceCheck) -> CheckResult:
         status, message = check_systemd(unit)
     elif check_type == "tcp":
         status, message = check_tcp(service.target)
+    elif check_type == "http":
+        status, message = check_http(service.target)
     else:
         status, message = "unknown", f"unsupported check type: {service.check_type}"
 

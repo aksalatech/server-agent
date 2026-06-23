@@ -17,6 +17,7 @@ from .config import (
     write_local_config,
 )
 from .detect import detect_services, services_to_yaml_items
+from .domains import detect_domains
 
 logging.basicConfig(
     level=logging.INFO,
@@ -106,6 +107,32 @@ def _report_detected_services(client: AgentClient) -> None:
         logger.error("Gagal mengirim laporan deteksi: %s", exc)
 
 
+def _report_detected_domains(client: AgentClient) -> None:
+    try:
+        detected = detect_domains()
+        payload = []
+        for item in detected:
+            payload.append(
+                {
+                    "domain": str(item["domain"]),
+                    "source": str(item["source"]),
+                    "url": str(item["url"]),
+                    "name": str(item["name"]),
+                    "type": "http",
+                    "target": str(item["target"]),
+                }
+            )
+
+        error = ""
+        if not payload:
+            error = "Tidak ada domain ditemukan di konfigurasi nginx/apache/caddy"
+
+        client.send_domains_report(payload, error=error)
+        logger.info("Laporan deteksi domain terkirim (%d domain)", len(payload))
+    except Exception as exc:  # noqa: BLE001
+        logger.error("Gagal mengirim laporan deteksi domain: %s", exc)
+
+
 def cmd_run(config_path: Path | None = None, once: bool = False) -> int:
     creds = load_credentials()
     api_key = creds.get("api_key", "")
@@ -123,6 +150,8 @@ def cmd_run(config_path: Path | None = None, once: bool = False) -> int:
             remote_payload = client.fetch_config()
             if remote_payload.get("detect_requested"):
                 _report_detected_services(client)
+            if remote_payload.get("detect_domains_requested"):
+                _report_detected_domains(client)
 
             remote_services = parse_remote_services(remote_payload)
             interval = int(remote_payload.get("interval_seconds") or local.interval_seconds)

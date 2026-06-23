@@ -1,6 +1,6 @@
 # Server Monitor Agent
 
-Agent Python yang di-install di VM client untuk memantau status layanan (nginx, apache, mysql, postgres, mariadb, dll) dan melaporkannya ke server monitoring pusat.
+Agent Python yang di-install di VM client untuk memantau status layanan (nginx, apache, caddy, mysql, postgres, mariadb, dll) dan melaporkannya ke server monitoring pusat.
 
 ## Persyaratan
 
@@ -53,16 +53,17 @@ sudo systemctl enable --now server-monitor-agent
 
 | Tipe | Deskripsi | Contoh target |
 |------|-----------|---------------|
-| `systemd` | Cek status unit systemd | `nginx`, `mysql`, `postgresql` |
-| `tcp` | Cek koneksi TCP | `127.0.0.1:3306`, `80` |
+| `systemd` | Cek status unit systemd | `nginx`, `apache2`, `caddy`, `mysql` |
+| `tcp` | Cek koneksi TCP | `127.0.0.1:80`, `127.0.0.1:3306` |
 
-## Konfigurasi Hybrid
+## Konfigurasi Service
 
-Agent menggabungkan config lokal (`/etc/server-monitor-agent/config.yaml`) dengan override dari dashboard:
+Daftar service dipantau dari **dashboard** (database). Tambahkan service via:
 
-- Service **remote** dari dashboard menggantikan service lokal dengan nama yang sama
-- Service lokal yang tidak ada di dashboard tetap dipantau
-- Dashboard bisa menambah atau menonaktifkan check tanpa mengedit file di VM
+- **Tambah Service** di halaman agent (template nginx/apache/caddy tersedia)
+- **Cek Service Aktif** → pilih service terdeteksi → Tambah
+
+Agent hanya mengecek service yang sudah dikonfigurasi di dashboard.
 
 ## Perintah
 

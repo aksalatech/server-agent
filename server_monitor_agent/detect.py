@@ -10,6 +10,7 @@ KNOWN_UNITS: dict[str, tuple[str, str, str]] = {
     "nginx": ("nginx", "systemd", "nginx"),
     "apache2": ("apache", "systemd", "apache2"),
     "httpd": ("apache", "systemd", "httpd"),
+    "caddy": ("caddy", "systemd", "caddy"),
     "mysql": ("mysql", "systemd", "mysql"),
     "mysqld": ("mysql", "systemd", "mysqld"),
     "mariadb": ("mariadb", "systemd", "mariadb"),
@@ -22,6 +23,10 @@ KNOWN_UNITS: dict[str, tuple[str, str, str]] = {
 }
 
 TCP_BY_UNIT: dict[str, tuple[str, str]] = {
+    "nginx": ("nginx-http", "127.0.0.1:80"),
+    "apache2": ("apache-http", "127.0.0.1:80"),
+    "httpd": ("apache-http", "127.0.0.1:80"),
+    "caddy": ("caddy-http", "127.0.0.1:80"),
     "mysql": ("mysql-tcp", "127.0.0.1:3306"),
     "mysqld": ("mysql-tcp", "127.0.0.1:3306"),
     "mariadb": ("mariadb-tcp", "127.0.0.1:3306"),
@@ -32,8 +37,10 @@ TCP_BY_UNIT: dict[str, tuple[str, str]] = {
 
 
 def _enabled_units() -> set[str]:
+    units: set[str] = set()
+
     try:
-        result = subprocess.run(
+        enabled = subprocess.run(
             [
                 "systemctl",
                 "list-unit-files",
@@ -47,14 +54,36 @@ def _enabled_units() -> set[str]:
             check=False,
             timeout=15,
         )
+        for line in enabled.stdout.splitlines():
+            unit = line.split()[0] if line.strip() else ""
+            if unit.endswith(".service"):
+                units.add(unit[: -len(".service")])
     except (OSError, subprocess.TimeoutExpired):
-        return set()
+        pass
 
-    units: set[str] = set()
-    for line in result.stdout.splitlines():
-        unit = line.split()[0] if line.strip() else ""
-        if unit.endswith(".service"):
-            units.add(unit[: -len(".service")])
+    # Sertakan juga service yang sedang active (meski tidak enabled di boot).
+    try:
+        active = subprocess.run(
+            [
+                "systemctl",
+                "list-units",
+                "--type=service",
+                "--state=active",
+                "--no-legend",
+                "--no-pager",
+            ],
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=15,
+        )
+        for line in active.stdout.splitlines():
+            unit = line.split()[0] if line.strip() else ""
+            if unit.endswith(".service"):
+                units.add(unit[: -len(".service")])
+    except (OSError, subprocess.TimeoutExpired):
+        pass
+
     return units
 
 

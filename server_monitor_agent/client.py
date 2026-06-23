@@ -66,6 +66,19 @@ class AgentClient:
         response.raise_for_status()
         return response.json()
 
+    def send_domains_report(self, domains: list[dict[str, Any]], error: str = "") -> dict[str, Any]:
+        payload: dict[str, Any] = {"domains": domains}
+        if error:
+            payload["error"] = error
+
+        response = self.session.post(
+            f"{self.server_url}/api/agent/v1/domains-report",
+            json=payload,
+            timeout=self.timeout,
+        )
+        response.raise_for_status()
+        return response.json()
+
 
 def _detect_ip() -> str:
     try:
