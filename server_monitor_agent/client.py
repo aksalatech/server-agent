@@ -42,6 +42,7 @@ class AgentClient:
         self,
         services: list[dict[str, Any]],
         system_metrics: dict[str, Any] | None = None,
+        app_logs: list[dict[str, Any]] | None = None,
     ) -> dict[str, Any]:
         hostname = socket.gethostname()
         ip_address = _detect_ip()
@@ -53,6 +54,8 @@ class AgentClient:
         }
         if system_metrics:
             payload["system_metrics"] = system_metrics
+        if app_logs:
+            payload["app_logs"] = app_logs
 
         response = self.session.post(
             f"{self.server_url}/api/agent/v1/heartbeat",
