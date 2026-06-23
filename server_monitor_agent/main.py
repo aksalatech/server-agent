@@ -282,6 +282,7 @@ def cmd_run(config_path: Path | None = None, once: bool = False) -> int:
                     "status": r.status,
                     "response_ms": r.response_ms,
                     "message": r.message,
+                    **({"db_size_bytes": r.db_size_bytes} if r.db_size_bytes is not None else {}),
                 }
                 for r in results
             ]

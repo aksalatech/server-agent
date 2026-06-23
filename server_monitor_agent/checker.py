@@ -30,6 +30,7 @@ class CheckResult:
     status: Status
     response_ms: int | None
     message: str
+    db_size_bytes: int | None = None
 
 
 def check_systemd(unit: str) -> tuple[Status, str]:
@@ -466,13 +467,129 @@ def run_check(service: ServiceCheck) -> CheckResult:
         status, message = "unknown", f"unsupported check type: {service.check_type}"
 
     elapsed_ms = int((time.perf_counter() - started) * 1000)
+    db_size_bytes = None
+    if status == "up" and check_type in {"mysql", "postgres", "redis", "mongodb"}:
+        db_size_bytes = get_database_size_bytes(
+            check_type,
+            service.target,
+            service.db_user,
+            service.db_password,
+        )
+
     return CheckResult(
         name=service.name,
         status=status,
         response_ms=elapsed_ms if status != "unknown" else None,
         message=message,
+        db_size_bytes=db_size_bytes,
     )
 
 
 def run_checks(services: list[ServiceCheck]) -> list[CheckResult]:
     return [run_check(svc) for svc in services]
+
+
+def _sql_literal(value: str) -> str:
+    return "'" + value.replace("'", "''") + "'"
+
+
+def get_database_size_bytes(
+    engine: str,
+    target: str,
+    db_user: str | None = None,
+    db_password: str | None = None,
+) -> int | None:
+    connection, database_name = _split_db_target(target)
+    if not database_name:
+        return None
+
+    try:
+        if engine == "mysql":
+            lines = _run_lines(
+                [
+                    "mysql",
+                    *_mysql_defaults_file(),
+                    *_mysql_conn_args_for_check(connection),
+                    *_mysql_auth_args(db_user, db_password),
+                    "-N",
+                    "-B",
+                    "-e",
+                    "SELECT COALESCE(SUM(data_length + index_length), 0) "
+                    "FROM information_schema.tables "
+                    f"WHERE table_schema = {_sql_literal(database_name)}",
+                ]
+            )
+            return int(lines[0]) if lines else 0
+
+        if engine == "postgres":
+            pg_env = None
+            if db_password:
+                pg_env = {**os.environ, "PGPASSWORD": db_password}
+            cmd = build_postgres_psql_cmd(
+                connection,
+                [
+                    "-t",
+                    "-A",
+                    "-c",
+                    f"SELECT pg_database_size({_sql_literal(database_name)})",
+                ],
+                db_user=db_user,
+            )
+            result = subprocess.run(
+                cmd,
+                capture_output=True,
+                text=True,
+                timeout=15,
+                check=False,
+                env=pg_env,
+            )
+            if result.returncode != 0:
+                return None
+            output = (result.stdout or "").strip()
+            return int(output) if output else 0
+
+        if engine == "redis":
+            base = _redis_cli_base(connection, db_user, db_password)
+            lines = _run_lines([*base, "-n", database_name, "DBSIZE"])
+            return int(lines[0]) if lines else 0
+
+        if engine == "mongodb":
+            host, port = _parse_host_port(connection, 27017)
+            for binary in ("mongosh", "mongo"):
+                try:
+                    lines = _run_lines(
+                        [
+                            binary,
+                            "--quiet",
+                            "--host",
+                            host,
+                            "--port",
+                            str(port),
+                            "--eval",
+                            f"db.getSiblingDB('{database_name}').stats().dataSize",
+                        ],
+                        timeout=20.0,
+                    )
+                    if lines:
+                        return int(float(lines[0]))
+                except (RuntimeError, ValueError):
+                    continue
+    except (RuntimeError, ValueError, subprocess.TimeoutExpired):
+        return None
+
+    return None
+
+
+def _redis_cli_base(
+    connection: str,
+    db_user: str | None = None,
+    db_password: str | None = None,
+) -> list[str]:
+    auth: list[str] = []
+    if db_password:
+        auth = ["-a", db_password]
+
+    if connection.startswith("socket:"):
+        return ["redis-cli", "-s", connection[7:], *auth]
+    host, port = _parse_host_port(connection, 6379)
+    return ["redis-cli", "-h", host, "-p", str(port), *auth]
