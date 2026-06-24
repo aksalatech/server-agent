@@ -1,0 +1,10 @@
+[Unit]
+Description=Update Server Monitor Agent from git
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+WorkingDirectory=/opt/server-monitor-agent
+ExecStart=/opt/server-monitor-agent/update.sh
+Environment=PYTHONUNBUFFERED=1

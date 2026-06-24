@@ -23,6 +23,13 @@ from .metrics import collect_system_metrics
 from .service_logs import collect_application_logs
 from .backup import BACKUP_WORK_DIR, backup_database, restore_database
 from .restart import restart_systemd_unit
+from .update import (
+    DEFAULT_BRANCH,
+    get_current_commit,
+    restart_agent_service,
+    run_agent_update,
+    should_auto_update,
+)
 
 logging.basicConfig(
     level=logging.INFO,
@@ -165,6 +172,98 @@ def _report_detected_databases(client: AgentClient) -> None:
         logger.error("Gagal mengirim laporan deteksi database: %s", exc)
 
 
+def _finish_update(
+    client: AgentClient,
+    result,
+    *,
+    job_id: int | None,
+    restart_on_change: bool,
+) -> None:
+    status = "completed" if result.updated else "up_to_date"
+    if job_id:
+        client.report_update_job(
+            job_id,
+            status,
+            result.message,
+            old_commit=result.old_commit,
+            new_commit=result.new_commit,
+        )
+    else:
+        client.report_scheduled_update(
+            status,
+            result.message,
+            old_commit=result.old_commit,
+            new_commit=result.new_commit,
+        )
+
+    if result.updated and restart_on_change:
+        logger.info("Memulai restart agent setelah update...")
+        restart_agent_service()
+
+
+def _run_update_flow(
+    client: AgentClient,
+    remote_payload: dict,
+    *,
+    job_id: int | None = None,
+) -> None:
+    branch = str(remote_payload.get("agent_repo_branch") or DEFAULT_BRANCH).strip() or DEFAULT_BRANCH
+
+    if job_id:
+        client.report_update_job(job_id, "running", f"Mengupdate agent dari git ({branch})...")
+        logger.info("Memproses update job %s", job_id)
+    else:
+        logger.info("Memproses auto-update terjadwal (branch %s)", branch)
+
+    result = run_agent_update(branch)
+    _finish_update(client, result, job_id=job_id, restart_on_change=True)
+
+    if job_id:
+        logger.info("Update job %s selesai: %s", job_id, result.message)
+    else:
+        logger.info("Auto-update selesai: %s", result.message)
+
+
+def _process_update_jobs(client: AgentClient, remote_payload: dict) -> bool:
+    jobs = remote_payload.get("update_jobs") or []
+    if not isinstance(jobs, list) or not jobs:
+        return False
+
+    job = jobs[0]
+    if not isinstance(job, dict):
+        return False
+
+    job_id = int(job.get("id") or 0)
+    if not job_id:
+        return False
+
+    try:
+        _run_update_flow(client, remote_payload, job_id=job_id)
+    except Exception as exc:  # noqa: BLE001
+        logger.error("Update job %s gagal: %s", job_id, exc)
+        try:
+            client.report_update_job(job_id, "failed", str(exc))
+        except Exception as report_exc:  # noqa: BLE001
+            logger.error("Gagal melaporkan kegagalan update %s: %s", job_id, report_exc)
+    return True
+
+
+def _maybe_auto_update(client: AgentClient, remote_payload: dict) -> None:
+    enabled = bool(remote_payload.get("agent_auto_update_enabled"))
+    interval = int(remote_payload.get("agent_auto_update_interval_minutes") or 60)
+    if not should_auto_update(enabled, interval):
+        return
+
+    try:
+        _run_update_flow(client, remote_payload)
+    except Exception as exc:  # noqa: BLE001
+        logger.error("Auto-update gagal: %s", exc)
+        try:
+            client.report_scheduled_update("failed", str(exc), old_commit=get_current_commit())
+        except Exception as report_exc:  # noqa: BLE001
+            logger.error("Gagal melaporkan auto-update: %s", report_exc)
+
+
 def _process_restart_jobs(client: AgentClient, remote_payload: dict) -> None:
     jobs = remote_payload.get("restart_jobs") or []
     if not isinstance(jobs, list) or not jobs:
@@ -265,6 +364,9 @@ def cmd_run(config_path: Path | None = None, once: bool = False) -> int:
             if remote_payload.get("detect_databases_requested"):
                 _report_detected_databases(client)
             _process_backup_jobs(client, remote_payload)
+            update_handled = _process_update_jobs(client, remote_payload)
+            if not update_handled:
+                _maybe_auto_update(client, remote_payload)
             _process_restart_jobs(client, remote_payload)
 
             remote_services = parse_remote_services(remote_payload)
@@ -312,6 +414,18 @@ def cmd_run(config_path: Path | None = None, once: bool = False) -> int:
         time.sleep(sleep_for)
 
 
+def cmd_update(branch: str = DEFAULT_BRANCH, restart: bool = True) -> int:
+    try:
+        result = run_agent_update(branch)
+        logger.info(result.message)
+        if result.updated and restart:
+            restart_agent_service()
+        return 0
+    except Exception as exc:  # noqa: BLE001
+        logger.error("Update gagal: %s", exc)
+        return 1
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Server Monitor Agent")
     sub = parser.add_subparsers(dest="command", required=True)
@@ -329,6 +443,10 @@ def build_parser() -> argparse.ArgumentParser:
     run.add_argument("--config", type=Path, default=None, help="Path config.yaml")
     run.add_argument("--once", action="store_true", help="Jalankan sekali lalu keluar")
 
+    update = sub.add_parser("update", help="Update agent dari git dan restart service")
+    update.add_argument("--branch", default=DEFAULT_BRANCH, help="Branch git yang dipull")
+    update.add_argument("--no-restart", action="store_true", help="Jangan restart service setelah update")
+
     return parser
 
 
@@ -343,6 +461,8 @@ def main(argv: list[str] | None = None) -> int:
     if args.command == "run":
         config_path = args.config or (CONFIG_FILE if CONFIG_FILE.exists() else None)
         return cmd_run(config_path, once=args.once)
+    if args.command == "update":
+        return cmd_update(args.branch, restart=not args.no_restart)
 
     parser.print_help()
     return 1

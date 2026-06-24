@@ -42,7 +42,11 @@ if [[ ! -f "${CONFIG_DIR}/config.yaml" ]]; then
 fi
 
 cp "${INSTALL_DIR}/server-monitor-agent.service" /etc/systemd/system/server-monitor-agent.service
+cp "${INSTALL_DIR}/server-monitor-agent-update.service" /etc/systemd/system/server-monitor-agent-update.service
+cp "${INSTALL_DIR}/server-monitor-agent-update.timer" /etc/systemd/system/server-monitor-agent-update.timer
+chmod +x "${INSTALL_DIR}/update.sh"
 systemctl daemon-reload
+systemctl enable --now server-monitor-agent-update.timer || true
 
 echo ""
 echo "Instalasi selesai."

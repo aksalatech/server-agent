@@ -65,6 +65,48 @@ class AgentClient:
         response.raise_for_status()
         return response.json()
 
+    def report_update_job(
+        self,
+        job_id: int,
+        status: str,
+        message: str = "",
+        old_commit: str = "",
+        new_commit: str = "",
+    ) -> dict[str, Any]:
+        response = self.session.post(
+            f"{self.server_url}/api/agent/v1/update-job",
+            json={
+                "job_id": str(job_id),
+                "status": status,
+                "message": message,
+                "old_commit": old_commit,
+                "new_commit": new_commit,
+            },
+            timeout=self.timeout,
+        )
+        response.raise_for_status()
+        return response.json()
+
+    def report_scheduled_update(
+        self,
+        status: str,
+        message: str = "",
+        old_commit: str = "",
+        new_commit: str = "",
+    ) -> dict[str, Any]:
+        response = self.session.post(
+            f"{self.server_url}/api/agent/v1/update-report",
+            json={
+                "status": status,
+                "message": message,
+                "old_commit": old_commit,
+                "new_commit": new_commit,
+            },
+            timeout=self.timeout,
+        )
+        response.raise_for_status()
+        return response.json()
+
     def report_restart_job(
         self,
         job_id: int,

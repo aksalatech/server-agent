@@ -81,8 +81,28 @@ python -m server_monitor_agent register --server-url URL --token TOKEN
 # Jalankan sekali (debug)
 python -m server_monitor_agent run --once
 
+# Update agent dari git (manual atau via systemd timer)
+python -m server_monitor_agent update
+
 # Jalankan loop (default via systemd)
 python -m server_monitor_agent run
+```
+
+## Auto-Update
+
+Agent dapat diperbarui otomatis dari git dengan dua cara:
+
+1. **Dari dashboard** — aktifkan *Auto-update agent dari git* di Edit Agent, atau klik **Update Sekarang**
+2. **Systemd timer lokal** — `server-monitor-agent-update.timer` menjalankan `update.sh` setiap 15 menit (fallback jika dashboard tidak mengatur)
+
+Setelah update, service `server-monitor-agent` di-restart otomatis.
+
+```bash
+# Cek timer auto-update lokal
+systemctl status server-monitor-agent-update.timer
+
+# Update manual dari CLI
+sudo /opt/server-monitor-agent/update.sh
 ```
 
 ## Log
