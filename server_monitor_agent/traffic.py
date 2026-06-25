@@ -46,6 +46,49 @@ ACCESS_LOG_FILES = [
     *CADDY_LOG_FILES,
 ]
 
+_PROCESS_RE = re.compile(r'users:\(\("([^"]+)"')
+_TLS_VERSION_RE = re.compile(r"\btls:([\d.]+)")
+_TLS_ULP_RE = re.compile(r"\btcp-ulp-tls\b")
+
+PORT_APPLICATIONS = {
+    53: "DNS",
+    80: "HTTP",
+    443: "HTTPS",
+    22: "SSH",
+    25: "SMTP",
+    110: "POP3",
+    143: "IMAP",
+    465: "SMTPS",
+    587: "SMTP",
+    993: "IMAPS",
+    995: "POP3S",
+    3306: "MySQL",
+    5432: "PostgreSQL",
+    6379: "Redis",
+    27017: "MongoDB",
+    8080: "HTTP",
+    8443: "HTTPS",
+}
+
+PROCESS_APPLICATIONS = {
+    "postgres": "PostgreSQL",
+    "mysqld": "MySQL",
+    "mariadbd": "MariaDB",
+    "redis-server": "Redis",
+    "mongod": "MongoDB",
+    "nginx": "HTTP",
+    "apache2": "HTTP",
+    "httpd": "HTTP",
+    "caddy": "HTTP",
+    "frankenphp": "HTTP",
+    "sshd": "SSH",
+    "named": "DNS",
+    "systemd-resolve": "DNS",
+    "node": "HTTP",
+}
+
+BROWSER_PROCESS_HINTS = ("chrome", "firefox", "chromium", "safari", "msedge", "brave")
+
 _COMBINED_LOG_RE = re.compile(
     r'^(\S+)\s+\S+\s+\S+\s+\[[^\]]+\]\s+"([A-Z][A-Z0-9]*)\s+([^\s"]+)\s+HTTP/[^"]+"\s+\d+'
 )
@@ -109,10 +152,76 @@ def _split_host_port(value: str) -> tuple[str, str]:
     return value, ""
 
 
+def _parse_process_name(line: str) -> str | None:
+    match = _PROCESS_RE.search(line)
+    if not match:
+        return None
+    return match.group(1).strip()
+
+
+def _parse_socket_meta(line: str) -> dict[str, Any]:
+    meta: dict[str, Any] = {}
+    tls_match = _TLS_VERSION_RE.search(line)
+    if tls_match:
+        meta["tls_version"] = tls_match.group(1)
+    elif _TLS_ULP_RE.search(line):
+        meta["tls_ulp"] = True
+    return meta
+
+
+def _service_port(direction: str, local_port: int | None, remote_port: int | None) -> int | None:
+    if direction == "inbound":
+        return local_port
+    return remote_port
+
+
+def _resolve_application(
+    direction: str,
+    local_port: int | None,
+    remote_port: int | None,
+    process_name: str | None,
+    tls_version: str | None,
+    tls_ulp: bool,
+) -> str:
+    service_port = _service_port(direction, local_port, remote_port)
+
+    if tls_version:
+        normalized = tls_version.replace(".", "_")
+        return f"SSL_TLSv{normalized}"
+    if tls_ulp:
+        return "SSL_TLS"
+
+    if process_name:
+        proc_lower = process_name.lower()
+        if any(hint in proc_lower for hint in BROWSER_PROCESS_HINTS):
+            return "HTTP.BROWSER"
+        for key, app in PROCESS_APPLICATIONS.items():
+            if key in proc_lower:
+                if app == "HTTP" and direction == "outbound" and service_port in {80, 443, 8080, 8443}:
+                    return "HTTP.BROWSER"
+                return app
+
+    if service_port and service_port in PORT_APPLICATIONS:
+        app = PORT_APPLICATIONS[service_port]
+        if app == "HTTPS":
+            return "SSL_TLS"
+        if app == "HTTP" and direction == "outbound":
+            return "HTTP.BROWSER"
+        return app
+
+    if service_port:
+        try:
+            return socket.getservbyport(service_port, "tcp").upper()
+        except OSError:
+            pass
+
+    return "TCP"
+
+
 def _parse_ss_connections() -> list[dict[str, Any]]:
     try:
         result = subprocess.run(
-            ["ss", "-H", "-ti", "state", "established"],
+            ["ss", "-H", "-tip", "state", "established"],
             capture_output=True,
             text=True,
             timeout=10,
@@ -140,13 +249,21 @@ def _parse_ss_connections() -> list[dict[str, Any]]:
 
             local_host, local_port_raw = _split_host_port(parts[2])
             remote_host, remote_port_raw = _split_host_port(parts[3])
+            direction = _classify_direction(
+                _parse_port(local_port_raw),
+                _parse_port(remote_port_raw),
+            )
             pending = {
                 "local_host": local_host,
                 "local_port": _parse_port(local_port_raw),
                 "remote_host": remote_host,
                 "remote_port": _parse_port(remote_port_raw),
+                "direction": direction,
+                "process_name": _parse_process_name(line),
                 "bytes_sent": 0,
                 "bytes_received": 0,
+                "tls_version": None,
+                "tls_ulp": False,
             }
             connections.append(pending)
             continue
@@ -154,10 +271,31 @@ def _parse_ss_connections() -> list[dict[str, Any]]:
         if pending is None:
             continue
 
+        socket_meta = _parse_socket_meta(line)
+        if socket_meta.get("tls_version"):
+            pending["tls_version"] = socket_meta["tls_version"]
+        if socket_meta.get("tls_ulp"):
+            pending["tls_ulp"] = True
+
         for key in ("bytes_sent", "bytes_received"):
             match = re.search(rf"{key}:(\d+)", line)
             if match:
                 pending[key] = int(match.group(1))
+
+    for conn in connections:
+        conn["application"] = _resolve_application(
+            str(conn.get("direction") or "inbound"),
+            conn.get("local_port"),
+            conn.get("remote_port"),
+            conn.get("process_name"),
+            conn.get("tls_version"),
+            bool(conn.get("tls_ulp")),
+        )
+        conn["service_port"] = _service_port(
+            str(conn.get("direction") or "inbound"),
+            conn.get("local_port"),
+            conn.get("remote_port"),
+        )
 
     return connections
 
@@ -238,6 +376,9 @@ def _collect_socket_peers() -> tuple[list[dict[str, Any]], list[dict[str, Any]]]
                 "tx_bytes_per_sec": 0.0,
                 "connections": 0,
                 "local_ports": set(),
+                "remote_ports": set(),
+                "service_ports": set(),
+                "applications": {},
             },
         )
 
@@ -251,6 +392,13 @@ def _collect_socket_peers() -> tuple[list[dict[str, Any]], list[dict[str, Any]]]
         entry["connections"] += 1
         if conn.get("local_port") is not None:
             entry["local_ports"].add(int(conn["local_port"]))
+        if conn.get("remote_port") is not None:
+            entry["remote_ports"].add(int(conn["remote_port"]))
+        service_port = conn.get("service_port")
+        if service_port is not None:
+            entry["service_ports"].add(int(service_port))
+        application = str(conn.get("application") or "TCP")
+        entry["applications"][application] = entry["applications"].get(application, 0) + 1
 
         if isinstance(prev_at, (int, float)) and isinstance(prev, dict):
             elapsed = now - float(prev_at)
@@ -282,6 +430,22 @@ def _collect_socket_peers() -> tuple[list[dict[str, Any]], list[dict[str, Any]]]
             rx_now, rx_avg, rx_peak = _rate_stats(rate_history[history_key], "rx")
             tx_now, tx_avg, tx_peak = _rate_stats(rate_history[history_key], "tx")
             hostname = _resolve_hostname(peer, hostname_cache)
+            service_ports = sorted(entry["service_ports"])
+            applications = sorted(
+                entry["applications"].keys(),
+                key=lambda name: entry["applications"][name],
+                reverse=True,
+            )
+            primary_port = service_ports[0] if service_ports else None
+            primary_application = applications[0] if applications else "TCP"
+            rate_samples = [
+                {
+                    "rx": float(sample.get("rx") or 0),
+                    "tx": float(sample.get("tx") or 0),
+                }
+                for sample in rate_history[history_key]
+                if isinstance(sample, dict)
+            ]
 
             rows.append(
                 {
@@ -297,6 +461,12 @@ def _collect_socket_peers() -> tuple[list[dict[str, Any]], list[dict[str, Any]]]
                     "tx_rate_peak": round(tx_peak, 1),
                     "connections": entry["connections"],
                     "local_ports": sorted(entry["local_ports"]),
+                    "remote_ports": sorted(entry["remote_ports"]),
+                    "port": primary_port,
+                    "ports": service_ports,
+                    "application": primary_application,
+                    "applications": applications,
+                    "rate_samples": rate_samples,
                 }
             )
         rows.sort(
