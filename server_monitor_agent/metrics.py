@@ -8,6 +8,7 @@ from datetime import datetime, timezone
 from typing import Any
 
 from .config import CONFIG_DIR
+from .traffic import collect_traffic
 
 NET_COUNTERS_FILE = CONFIG_DIR / "net-counters.json"
 _SKIP_IFACE_PREFIXES = ("docker", "veth", "br-", "virbr", "tun", "tap", "wg")
@@ -198,6 +199,7 @@ def collect_system_metrics() -> dict[str, Any]:
     cpu_cores = os.cpu_count() or 1
 
     network = _collect_network()
+    traffic = collect_traffic()
 
     return {
         "cpu_percent": cpu_percent,
@@ -219,5 +221,8 @@ def collect_system_metrics() -> dict[str, Any]:
         "network_rx_total_bytes": network["rx_total_bytes"],
         "network_tx_total_bytes": network["tx_total_bytes"],
         "network_interfaces": network["interfaces"],
+        "traffic_inbound": traffic["traffic_inbound"],
+        "traffic_outbound": traffic["traffic_outbound"],
+        "http_clients": traffic["http_clients"],
         "collected_at": datetime.now(timezone.utc).isoformat(),
     }
