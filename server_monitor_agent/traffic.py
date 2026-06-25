@@ -20,6 +20,7 @@ HTTP_OFFSET_FILE = CONFIG_DIR / "http-traffic-offsets.json"
 MAX_PEERS = 30
 MAX_HTTP_CLIENTS = 25
 MAX_ACCESS_LINES = 500
+RATE_HISTORY_MAX = 20
 
 COMMON_SERVER_PORTS = {
     22,
@@ -179,6 +180,29 @@ def _save_peer_state(state: dict[str, Any]) -> None:
         pass
 
 
+def _resolve_hostname(ip: str, cache: dict[str, str]) -> str:
+    if ip in cache:
+        return cache[ip]
+    try:
+        name, _, _ = socket.gethostbyaddr(ip)
+        short = name.rstrip(".")
+        cache[ip] = short
+        return short
+    except OSError:
+        cache[ip] = ip
+        return ip
+
+
+def _rate_stats(samples: list[dict[str, Any]], key: str) -> tuple[float, float, float]:
+    values = [float(item.get(key) or 0) for item in samples if isinstance(item, dict)]
+    if not values:
+        return 0.0, 0.0, 0.0
+    current = values[-1]
+    average = sum(values) / len(values)
+    peak = max(values)
+    return current, average, peak
+
+
 def _collect_socket_peers() -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
     import time
 
@@ -186,6 +210,8 @@ def _collect_socket_peers() -> tuple[list[dict[str, Any]], list[dict[str, Any]]]
     state = _load_peer_state()
     prev_at = state.get("timestamp")
     prev_peers = state.get("peers") if isinstance(state.get("peers"), dict) else {}
+    rate_history = state.get("rate_history") if isinstance(state.get("rate_history"), dict) else {}
+    hostname_cache = state.get("hostname_cache") if isinstance(state.get("hostname_cache"), dict) else {}
 
     inbound_agg: dict[str, dict[str, Any]] = {}
     outbound_agg: dict[str, dict[str, Any]] = {}
@@ -236,29 +262,66 @@ def _collect_socket_peers() -> tuple[list[dict[str, Any]], list[dict[str, Any]]]
 
         prev_peers[conn_key] = {"rx_bytes": rx, "tx_bytes": tx}
 
-    _save_peer_state({"timestamp": now, "peers": prev_peers})
-
-    def finalize(agg: dict[str, dict[str, Any]]) -> list[dict[str, Any]]:
+    def finalize(agg: dict[str, dict[str, Any]], direction: str) -> list[dict[str, Any]]:
         rows = []
         for entry in agg.values():
+            peer = entry["peer"]
+            history_key = f"{direction}:{peer}"
+            samples = rate_history.get(history_key)
+            if not isinstance(samples, list):
+                samples = []
+            samples.append(
+                {
+                    "t": now,
+                    "rx": round(entry["rx_bytes_per_sec"], 1),
+                    "tx": round(entry["tx_bytes_per_sec"], 1),
+                }
+            )
+            rate_history[history_key] = samples[-RATE_HISTORY_MAX:]
+
+            rx_now, rx_avg, rx_peak = _rate_stats(rate_history[history_key], "rx")
+            tx_now, tx_avg, tx_peak = _rate_stats(rate_history[history_key], "tx")
+            hostname = _resolve_hostname(peer, hostname_cache)
+
             rows.append(
                 {
-                    "peer": entry["peer"],
+                    "peer": peer,
+                    "hostname": hostname,
                     "rx_bytes": entry["rx_bytes"],
                     "tx_bytes": entry["tx_bytes"],
-                    "rx_bytes_per_sec": round(entry["rx_bytes_per_sec"], 1),
-                    "tx_bytes_per_sec": round(entry["tx_bytes_per_sec"], 1),
+                    "rx_bytes_per_sec": round(rx_now, 1),
+                    "tx_bytes_per_sec": round(tx_now, 1),
+                    "rx_rate_avg": round(rx_avg, 1),
+                    "tx_rate_avg": round(tx_avg, 1),
+                    "rx_rate_peak": round(rx_peak, 1),
+                    "tx_rate_peak": round(tx_peak, 1),
                     "connections": entry["connections"],
                     "local_ports": sorted(entry["local_ports"]),
                 }
             )
         rows.sort(
-            key=lambda row: row["rx_bytes_per_sec"] + row["tx_bytes_per_sec"],
+            key=lambda row: (
+                row["rx_bytes_per_sec"] + row["tx_bytes_per_sec"]
+                if direction == "in"
+                else row["tx_bytes_per_sec"] + row["rx_bytes_per_sec"]
+            ),
             reverse=True,
         )
         return rows[:MAX_PEERS]
 
-    return finalize(inbound_agg), finalize(outbound_agg)
+    inbound_rows = finalize(inbound_agg, "in")
+    outbound_rows = finalize(outbound_agg, "out")
+
+    _save_peer_state(
+        {
+            "timestamp": now,
+            "peers": prev_peers,
+            "rate_history": rate_history,
+            "hostname_cache": hostname_cache,
+        }
+    )
+
+    return inbound_rows, outbound_rows
 
 
 def _load_http_offsets() -> dict[str, dict[str, int]]:
