@@ -7,6 +7,8 @@ import tarfile
 import tempfile
 from pathlib import Path
 
+from .checker import _postgres_psql_host_port, _postgres_run_as_db_user
+
 BACKUP_WORK_DIR = Path("/var/lib/server-monitor-agent/backups")
 
 
@@ -166,8 +168,8 @@ def _restore_mysql(target: str, database_name: str | None, input_path: Path) -> 
 def _backup_postgres(target: str, database_name: str | None, output_path: Path) -> None:
     with tempfile.TemporaryDirectory(dir=BACKUP_WORK_DIR) as tmp:
         raw_path = Path(tmp) / "dump.sql"
-        host, port = _parse_host_port(target, 5432)
-        cmd = ["pg_dump", "-h", host, "-p", str(port), "-Fp"]
+        host, port = _postgres_psql_host_port(target)
+        cmd = _postgres_run_as_db_user(["pg_dump", "-h", host, "-p", str(port), "-Fp"])
         if database_name:
             cmd.append(database_name)
         else:
@@ -187,8 +189,10 @@ def _restore_postgres(target: str, database_name: str | None, input_path: Path) 
         with gzip.open(input_path, "rb") as src, raw_path.open("wb") as dst:
             shutil.copyfileobj(src, dst)
 
-        host, port = _parse_host_port(target, 5432)
-        cmd = ["psql", "-h", host, "-p", str(port), "-v", "ON_ERROR_STOP=1"]
+        host, port = _postgres_psql_host_port(target)
+        cmd = _postgres_run_as_db_user(
+            ["psql", "-h", host, "-p", str(port), "-v", "ON_ERROR_STOP=1"]
+        )
         if database_name:
             cmd.extend(["-d", database_name])
 
