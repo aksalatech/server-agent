@@ -2,7 +2,9 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import shutil
+import subprocess
 import time
 from datetime import datetime, timezone
 from typing import Any
@@ -12,6 +14,66 @@ from .traffic import collect_traffic
 
 NET_COUNTERS_FILE = CONFIG_DIR / "net-counters.json"
 _SKIP_IFACE_PREFIXES = ("docker", "veth", "br-", "virbr", "tun", "tap", "wg")
+_TOP_PROCESS_LIMIT = 50
+_PS_LINE_RE = re.compile(
+    r"^\s*(\d+)\s+(\S+)\s+(\S+)\s+([\d.,]+)\s+([\d.,]+)\s+(\d+)\s*(.*)$"
+)
+
+
+def _parse_ps_process_line(line: str) -> dict[str, Any] | None:
+    match = _PS_LINE_RE.match(line.strip())
+    if not match:
+        return None
+    pid_raw, user, name, cpu_raw, mem_raw, rss_raw, command = match.groups()
+    try:
+        pid = int(pid_raw)
+        cpu_percent = float(cpu_raw.replace(",", "."))
+        memory_percent = float(mem_raw.replace(",", "."))
+        memory_mb = round(int(rss_raw) / 1024)
+    except (TypeError, ValueError):
+        return None
+
+    command = command.strip()
+    if not command:
+        command = name
+
+    return {
+        "pid": pid,
+        "user": user,
+        "name": name,
+        "command": command[:500],
+        "cpu_percent": round(cpu_percent, 1),
+        "memory_percent": round(memory_percent, 1),
+        "memory_mb": memory_mb,
+    }
+
+
+def _read_processes(limit: int = _TOP_PROCESS_LIMIT) -> list[dict[str, Any]]:
+    try:
+        result = subprocess.run(
+            ["ps", "-eo", "pid,user,comm,pcpu,pmem,rss,args", "--sort=-pcpu"],
+            capture_output=True,
+            text=True,
+            timeout=8,
+            check=False,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return []
+
+    if result.returncode != 0 or not result.stdout.strip():
+        return []
+
+    processes: list[dict[str, Any]] = []
+    seen_pids: set[int] = set()
+    for line in result.stdout.splitlines()[1:]:
+        parsed = _parse_ps_process_line(line)
+        if parsed is None or parsed["pid"] in seen_pids:
+            continue
+        seen_pids.add(parsed["pid"])
+        processes.append(parsed)
+        if len(processes) >= limit:
+            break
+    return processes
 
 
 def _read_meminfo() -> dict[str, int]:
@@ -200,6 +262,9 @@ def collect_system_metrics() -> dict[str, Any]:
 
     network = _collect_network()
     traffic = collect_traffic()
+    processes = _read_processes()
+    by_cpu = sorted(processes, key=lambda item: item["cpu_percent"], reverse=True)
+    by_memory = sorted(processes, key=lambda item: item["memory_percent"], reverse=True)
 
     return {
         "cpu_percent": cpu_percent,
@@ -224,5 +289,8 @@ def collect_system_metrics() -> dict[str, Any]:
         "traffic_inbound": traffic["traffic_inbound"],
         "traffic_outbound": traffic["traffic_outbound"],
         "http_clients": traffic["http_clients"],
+        "processes": processes,
+        "top_cpu_processes": by_cpu[:10],
+        "top_memory_processes": by_memory[:10],
         "collected_at": datetime.now(timezone.utc).isoformat(),
     }
