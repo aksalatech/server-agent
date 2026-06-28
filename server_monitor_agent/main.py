@@ -435,7 +435,7 @@ def build_parser() -> argparse.ArgumentParser:
     register.add_argument("--token", required=True, help="Registration token dari dashboard")
     register.add_argument("--config", type=Path, default=None, help="Path config.yaml")
 
-    detect = sub.add_parser("detect", help="Deteksi layanan systemd yang aktif")
+    detect = sub.add_parser("detect", help="Scan semua layanan systemd di host")
     detect.add_argument("--config", type=Path, default=None, help="Path config.yaml")
     detect.add_argument("--write", action="store_true", help="Tulis hasil ke config.yaml")
 

@@ -3,40 +3,9 @@ from __future__ import annotations
 import subprocess
 from typing import Any
 
-from .checker import check_tcp
-
-# systemd unit name -> (display name, check type, target)
-KNOWN_UNITS: dict[str, tuple[str, str, str]] = {
-    "nginx": ("nginx", "systemd", "nginx"),
-    "apache2": ("apache", "systemd", "apache2"),
-    "httpd": ("apache", "systemd", "httpd"),
-    "caddy": ("caddy", "systemd", "caddy"),
-    "mysql": ("mysql", "systemd", "mysql"),
-    "mysqld": ("mysql", "systemd", "mysqld"),
-    "mariadb": ("mariadb", "systemd", "mariadb"),
-    "postgresql": ("postgres", "systemd", "postgresql"),
-    "redis-server": ("redis", "systemd", "redis-server"),
-    "redis": ("redis", "systemd", "redis"),
-    "docker": ("docker", "systemd", "docker"),
-    "ssh": ("ssh", "systemd", "ssh"),
-    "sshd": ("ssh", "systemd", "sshd"),
-}
-
-TCP_BY_UNIT: dict[str, tuple[str, str]] = {
-    "nginx": ("nginx-http", "127.0.0.1:80"),
-    "apache2": ("apache-http", "127.0.0.1:80"),
-    "httpd": ("apache-http", "127.0.0.1:80"),
-    "caddy": ("caddy-http", "127.0.0.1:80"),
-    "mysql": ("mysql-tcp", "127.0.0.1:3306"),
-    "mysqld": ("mysql-tcp", "127.0.0.1:3306"),
-    "mariadb": ("mariadb-tcp", "127.0.0.1:3306"),
-    "postgresql": ("postgres-tcp", "127.0.0.1:5432"),
-    "redis-server": ("redis-tcp", "127.0.0.1:6379"),
-    "redis": ("redis-tcp", "127.0.0.1:6379"),
-}
-
 
 def _enabled_units() -> set[str]:
+    """Return enabled or currently active systemd service unit names."""
     units: set[str] = set()
 
     try:
@@ -61,7 +30,6 @@ def _enabled_units() -> set[str]:
     except (OSError, subprocess.TimeoutExpired):
         pass
 
-    # Sertakan juga service yang sedang active (meski tidak enabled di boot).
     try:
         active = subprocess.run(
             [
@@ -87,37 +55,55 @@ def _enabled_units() -> set[str]:
     return units
 
 
+def _list_all_service_units() -> list[dict[str, str]]:
+    """Enumerate all systemd service units on the host."""
+    units: list[dict[str, str]] = []
+
+    try:
+        result = subprocess.run(
+            [
+                "systemctl",
+                "list-units",
+                "--type=service",
+                "--all",
+                "--no-legend",
+                "--no-pager",
+            ],
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=30,
+        )
+        for line in result.stdout.splitlines():
+            line = line.strip()
+            if not line:
+                continue
+            parts = line.split(None, 4)
+            if len(parts) < 4:
+                continue
+            unit_file = parts[0]
+            if not unit_file.endswith(".service"):
+                continue
+            unit_name = unit_file[: -len(".service")]
+            active = parts[2]
+            sub = parts[3]
+            units.append(
+                {
+                    "name": unit_name,
+                    "type": "systemd",
+                    "unit": unit_name,
+                    "state": f"{active}/{sub}",
+                }
+            )
+    except (OSError, subprocess.TimeoutExpired):
+        pass
+
+    units.sort(key=lambda item: item["name"].lower())
+    return units
+
+
 def detect_services() -> list[dict[str, str]]:
-    enabled = _enabled_units()
-    services: list[dict[str, str]] = []
-    seen_names: set[str] = set()
-    matched_units: set[str] = set()
-
-    for unit in sorted(enabled):
-        if unit not in KNOWN_UNITS:
-            continue
-        name, check_type, target = KNOWN_UNITS[unit]
-        if name in seen_names:
-            continue
-        services.append({"name": name, "type": check_type, "unit": target})
-        seen_names.add(name)
-        matched_units.add(unit)
-
-    for unit in matched_units:
-        if unit not in TCP_BY_UNIT:
-            continue
-        tcp_name, tcp_target = TCP_BY_UNIT[unit]
-        if tcp_name in seen_names:
-            continue
-        # Hanya tambahkan cek TCP jika port benar-benar menerima koneksi.
-        # Banyak MariaDB/PostgreSQL hanya listen via Unix socket, bukan TCP localhost.
-        status, _ = check_tcp(tcp_target)
-        if status != "up":
-            continue
-        services.append({"name": tcp_name, "type": "tcp", "target": tcp_target})
-        seen_names.add(tcp_name)
-
-    return services
+    return _list_all_service_units()
 
 
 def services_to_yaml_items(services: list[dict[str, str]]) -> list[dict[str, Any]]:
@@ -128,5 +114,7 @@ def services_to_yaml_items(services: list[dict[str, str]]) -> list[dict[str, Any
             item["unit"] = svc.get("unit", svc["name"])
         else:
             item["target"] = svc["target"]
+        if svc.get("state"):
+            item["state"] = svc["state"]
         items.append(item)
     return items
