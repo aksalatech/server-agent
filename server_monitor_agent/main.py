@@ -202,7 +202,7 @@ def _report_detected_docker(client: AgentClient) -> None:
 
 def _report_detected_pm2(client: AgentClient) -> None:
     try:
-        detected = detect_pm2_apps()
+        detected, detect_error = detect_pm2_apps()
         payload = []
         for item in detected:
             payload.append(
@@ -219,9 +219,9 @@ def _report_detected_pm2(client: AgentClient) -> None:
                 }
             )
 
-        error = ""
-        if not payload:
-            error = "Tidak ada proses PM2 ditemukan atau pm2 CLI tidak tersedia"
+        error = detect_error or ""
+        if not payload and not error:
+            error = "Tidak ada proses PM2 ditemukan di host ini"
 
         client.send_pm2_report(payload, error=error)
         logger.info("Laporan deteksi PM2 terkirim (%d app)", len(payload))

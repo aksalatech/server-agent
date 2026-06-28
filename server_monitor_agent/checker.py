@@ -1,17 +1,19 @@
 from __future__ import annotations
 
+import json
 import os
 import shutil
 import socket
 import ssl
 import subprocess
 import time
-import json
 import urllib.error
 import urllib.request
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal
+
+from .pm2_cli import pm2_jlist
 
 Status = Literal["up", "down", "unknown"]
 
@@ -483,23 +485,8 @@ def check_pm2(target: str) -> tuple[Status, str]:
         return "unknown", "target kosong"
 
     try:
-        result = subprocess.run(
-            ["pm2", "jlist"],
-            capture_output=True,
-            text=True,
-            timeout=10,
-            check=False,
-        )
-        if result.returncode != 0 or not result.stdout.strip():
-            return "unknown", "pm2 jlist failed"
-
-        apps = json.loads(result.stdout)
-        if not isinstance(apps, list):
-            return "unknown", "invalid pm2 response"
-
+        apps = pm2_jlist(timeout=10.0)
         for app in apps:
-            if not isinstance(app, dict):
-                continue
             app_name = str(app.get("name") or "").strip()
             if app_name != name:
                 continue

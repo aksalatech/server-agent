@@ -9,6 +9,7 @@ from pathlib import Path
 from typing import Any
 
 from .config import CONFIG_DIR
+from .pm2_cli import pm2_jlist
 
 LOG_OFFSETS_FILE = CONFIG_DIR / "log-offsets.json"
 MAX_LINES_PER_HEARTBEAT = 40
@@ -308,25 +309,8 @@ def _collect_pm2_logs(state: dict[str, dict[str, int]], limit: int) -> list[AppL
     remaining = limit
 
     try:
-        result = subprocess.run(
-            ["pm2", "jlist"],
-            capture_output=True,
-            text=True,
-            timeout=10,
-            check=False,
-        )
-    except (OSError, subprocess.TimeoutExpired):
-        return entries
-
-    if result.returncode != 0 or not result.stdout.strip():
-        return entries
-
-    try:
-        apps = json.loads(result.stdout)
-    except json.JSONDecodeError:
-        return entries
-
-    if not isinstance(apps, list):
+        apps = pm2_jlist(timeout=10.0)
+    except (OSError, subprocess.TimeoutExpired, RuntimeError, FileNotFoundError):
         return entries
 
     for app in apps:

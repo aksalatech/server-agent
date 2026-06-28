@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import subprocess
 
+from .pm2_cli import run_pm2
+
 
 def restart_systemd_unit(unit: str, timeout: float = 60.0) -> str:
     name = unit.strip()
@@ -71,13 +73,7 @@ def restart_pm2_app(target: str, timeout: float = 60.0) -> str:
     if not name:
         raise ValueError("target PM2 kosong")
 
-    result = subprocess.run(
-        ["pm2", "restart", name],
-        capture_output=True,
-        text=True,
-        timeout=timeout,
-        check=False,
-    )
+    result = run_pm2(["restart", name], timeout=timeout)
     output = (result.stderr or result.stdout or "").strip()
     if result.returncode != 0:
         raise RuntimeError(output or f"pm2 restart {name} gagal")

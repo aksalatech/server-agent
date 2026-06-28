@@ -4,6 +4,8 @@ import json
 import subprocess
 from typing import Any
 
+from .pm2_cli import parse_pm2_app, pm2_jlist, resolve_pm2_bin
+
 
 def detect_docker_containers() -> list[dict[str, str]]:
     containers: list[dict[str, str]] = []
@@ -54,51 +56,23 @@ def detect_docker_containers() -> list[dict[str, str]]:
     return containers
 
 
-def detect_pm2_apps() -> list[dict[str, Any]]:
-    apps: list[dict[str, Any]] = []
+def detect_pm2_apps() -> tuple[list[dict[str, Any]], str | None]:
+    """Return (apps, error_message). error is set only when discovery fails."""
+    if not resolve_pm2_bin():
+        return [], "pm2 CLI tidak ditemukan (install NVM/PM2 atau set PM2_BIN di environment service)"
 
     try:
-        result = subprocess.run(
-            ["pm2", "jlist"],
-            capture_output=True,
-            text=True,
-            check=False,
-            timeout=15,
-        )
-        if result.returncode != 0 or not result.stdout.strip():
-            return apps
+        raw_apps = pm2_jlist()
+    except (OSError, subprocess.TimeoutExpired):
+        return [], "pm2 jlist timeout atau gagal dijalankan"
+    except (json.JSONDecodeError, RuntimeError) as exc:
+        return [], str(exc) or "pm2 jlist gagal"
 
-        payload = json.loads(result.stdout)
-        if not isinstance(payload, list):
-            return apps
-
-        for app in payload:
-            if not isinstance(app, dict):
-                continue
-            name = str(app.get("name") or "").strip()
-            if not name:
-                continue
-
-            env = app.get("pm2_env") if isinstance(app.get("pm2_env"), dict) else {}
-            monit = app.get("monit") if isinstance(app.get("monit"), dict) else {}
-            status = str(env.get("status") or "").strip()
-            mode = str(env.get("exec_mode") or env.get("mode") or "").strip()
-
-            apps.append(
-                {
-                    "name": name,
-                    "type": "pm2",
-                    "target": name,
-                    "mode": mode,
-                    "status": status,
-                    "cpu": float(monit.get("cpu") or 0),
-                    "memory": int(monit.get("memory") or 0),
-                    "restarts": int(env.get("restart_time") or 0),
-                    "uptime_ms": int(env.get("pm_uptime") or 0),
-                }
-            )
-    except (OSError, subprocess.TimeoutExpired, json.JSONDecodeError, TypeError, ValueError):
-        pass
+    apps: list[dict[str, Any]] = []
+    for app in raw_apps:
+        parsed = parse_pm2_app(app)
+        if parsed:
+            apps.append(parsed)
 
     apps.sort(key=lambda item: str(item["name"]).lower())
-    return apps
+    return apps, None
