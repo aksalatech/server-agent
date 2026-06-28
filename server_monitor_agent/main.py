@@ -19,10 +19,11 @@ from .config import (
 from .detect import detect_services, services_to_yaml_items
 from .domains import detect_domains
 from .databases import detect_databases
+from .runtime_detect import detect_docker_containers, detect_pm2_apps
 from .metrics import collect_system_metrics
 from .service_logs import collect_application_logs
 from .backup import BACKUP_WORK_DIR, backup_database, restore_database
-from .restart import restart_systemd_unit
+from .restart import restart_docker_container, restart_pm2_app, restart_systemd_unit
 from .update import (
     DEFAULT_BRANCH,
     get_current_commit,
@@ -172,6 +173,62 @@ def _report_detected_databases(client: AgentClient) -> None:
         logger.error("Gagal mengirim laporan deteksi database: %s", exc)
 
 
+def _report_detected_docker(client: AgentClient) -> None:
+    try:
+        detected = detect_docker_containers()
+        payload = []
+        for item in detected:
+            payload.append(
+                {
+                    "name": str(item["name"]),
+                    "type": "docker",
+                    "target": str(item["target"]),
+                    "image": str(item.get("image") or ""),
+                    "state": str(item.get("state") or ""),
+                    "status": str(item.get("status") or ""),
+                    "ports": str(item.get("ports") or ""),
+                }
+            )
+
+        error = ""
+        if not payload:
+            error = "Tidak ada container Docker ditemukan atau docker CLI tidak tersedia"
+
+        client.send_docker_report(payload, error=error)
+        logger.info("Laporan deteksi Docker terkirim (%d container)", len(payload))
+    except Exception as exc:  # noqa: BLE001
+        logger.error("Gagal mengirim laporan deteksi Docker: %s", exc)
+
+
+def _report_detected_pm2(client: AgentClient) -> None:
+    try:
+        detected = detect_pm2_apps()
+        payload = []
+        for item in detected:
+            payload.append(
+                {
+                    "name": str(item["name"]),
+                    "type": "pm2",
+                    "target": str(item["target"]),
+                    "mode": str(item.get("mode") or ""),
+                    "status": str(item.get("status") or ""),
+                    "cpu": item.get("cpu"),
+                    "memory": item.get("memory"),
+                    "restarts": item.get("restarts"),
+                    "uptime_ms": item.get("uptime_ms"),
+                }
+            )
+
+        error = ""
+        if not payload:
+            error = "Tidak ada proses PM2 ditemukan atau pm2 CLI tidak tersedia"
+
+        client.send_pm2_report(payload, error=error)
+        logger.info("Laporan deteksi PM2 terkirim (%d app)", len(payload))
+    except Exception as exc:  # noqa: BLE001
+        logger.error("Gagal mengirim laporan deteksi PM2: %s", exc)
+
+
 def _finish_update(
     client: AgentClient,
     result,
@@ -279,11 +336,17 @@ def _process_restart_jobs(client: AgentClient, remote_payload: dict) -> None:
 
     unit = str(job.get("unit") or "").strip()
     service_name = str(job.get("service_name") or unit)
+    check_type = str(job.get("check_type") or "systemd").strip().lower()
 
     try:
         client.report_restart_job(job_id, "running", f"Merestart {unit}...")
         logger.info("Memproses restart job %s (%s)", job_id, unit)
-        message = restart_systemd_unit(unit)
+        if check_type == "docker":
+            message = restart_docker_container(unit)
+        elif check_type == "pm2":
+            message = restart_pm2_app(unit)
+        else:
+            message = restart_systemd_unit(unit)
         client.report_restart_job(job_id, "completed", message)
         logger.info("Restart job %s selesai: %s", job_id, service_name)
     except Exception as exc:  # noqa: BLE001
@@ -363,6 +426,10 @@ def cmd_run(config_path: Path | None = None, once: bool = False) -> int:
                 _report_detected_domains(client)
             if remote_payload.get("detect_databases_requested"):
                 _report_detected_databases(client)
+            if remote_payload.get("detect_docker_requested"):
+                _report_detected_docker(client)
+            if remote_payload.get("detect_pm2_requested"):
+                _report_detected_pm2(client)
             _process_backup_jobs(client, remote_payload)
             update_handled = _process_update_jobs(client, remote_payload)
             if not update_handled:

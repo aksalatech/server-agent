@@ -6,6 +6,7 @@ import socket
 import ssl
 import subprocess
 import time
+import json
 import urllib.error
 import urllib.request
 from dataclasses import dataclass
@@ -444,6 +445,80 @@ def check_mongodb(
     return tcp_status, tcp_message
 
 
+def check_docker(target: str) -> tuple[Status, str]:
+    name = target.strip()
+    if not name:
+        return "unknown", "target kosong"
+
+    try:
+        result = subprocess.run(
+            ["docker", "inspect", "-f", "{{.State.Status}}|{{.State.Running}}|{{.Config.Image}}", name],
+            capture_output=True,
+            text=True,
+            timeout=10,
+            check=False,
+        )
+        if result.returncode != 0:
+            return "down", (result.stderr or result.stdout or "container not found").strip()
+
+        parts = result.stdout.strip().split("|", 2)
+        state = parts[0] if parts else ""
+        running = parts[1].lower() == "true" if len(parts) > 1 else False
+        image = parts[2] if len(parts) > 2 else ""
+
+        if running and state == "running":
+            return "up", image or state
+        return "down", image or state or "not running"
+    except FileNotFoundError:
+        return "unknown", "docker not found"
+    except subprocess.TimeoutExpired:
+        return "down", "timeout"
+    except Exception as exc:  # noqa: BLE001
+        return "unknown", str(exc)
+
+
+def check_pm2(target: str) -> tuple[Status, str]:
+    name = target.strip()
+    if not name:
+        return "unknown", "target kosong"
+
+    try:
+        result = subprocess.run(
+            ["pm2", "jlist"],
+            capture_output=True,
+            text=True,
+            timeout=10,
+            check=False,
+        )
+        if result.returncode != 0 or not result.stdout.strip():
+            return "unknown", "pm2 jlist failed"
+
+        apps = json.loads(result.stdout)
+        if not isinstance(apps, list):
+            return "unknown", "invalid pm2 response"
+
+        for app in apps:
+            if not isinstance(app, dict):
+                continue
+            app_name = str(app.get("name") or "").strip()
+            if app_name != name:
+                continue
+            env = app.get("pm2_env") if isinstance(app.get("pm2_env"), dict) else {}
+            status = str(env.get("status") or "").strip()
+            mode = str(env.get("exec_mode") or env.get("mode") or "").strip()
+            if status == "online":
+                return "up", mode or status
+            return "down", status or "stopped"
+
+        return "down", "process not found"
+    except FileNotFoundError:
+        return "unknown", "pm2 not found"
+    except subprocess.TimeoutExpired:
+        return "down", "timeout"
+    except Exception as exc:  # noqa: BLE001
+        return "unknown", str(exc)
+
+
 def run_check(service: ServiceCheck) -> CheckResult:
     started = time.perf_counter()
     check_type = service.check_type.lower()
@@ -463,6 +538,10 @@ def run_check(service: ServiceCheck) -> CheckResult:
         status, message = check_redis(service.target, service.db_user, service.db_password)
     elif check_type == "mongodb":
         status, message = check_mongodb(service.target, service.db_user, service.db_password)
+    elif check_type == "docker":
+        status, message = check_docker(service.target or service.name)
+    elif check_type == "pm2":
+        status, message = check_pm2(service.target or service.name)
     else:
         status, message = "unknown", f"unsupported check type: {service.check_type}"
 

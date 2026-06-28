@@ -166,6 +166,34 @@ class AgentClient:
         response.raise_for_status()
         return response.json()
 
+    def send_docker_report(
+        self, containers: list[dict[str, Any]], error: str = ""
+    ) -> dict[str, Any]:
+        payload: dict[str, Any] = {"containers": containers}
+        if error:
+            payload["error"] = error
+
+        response = self.session.post(
+            f"{self.server_url}/api/agent/v1/docker-report",
+            json=payload,
+            timeout=self.timeout,
+        )
+        response.raise_for_status()
+        return response.json()
+
+    def send_pm2_report(self, apps: list[dict[str, Any]], error: str = "") -> dict[str, Any]:
+        payload: dict[str, Any] = {"apps": apps}
+        if error:
+            payload["error"] = error
+
+        response = self.session.post(
+            f"{self.server_url}/api/agent/v1/pm2-report",
+            json=payload,
+            timeout=self.timeout,
+        )
+        response.raise_for_status()
+        return response.json()
+
     def report_backup_job(
         self,
         job_id: int,
