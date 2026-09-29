@@ -366,8 +366,11 @@ def _process_backup_jobs(client: AgentClient, remote_payload: dict) -> None:
     if not isinstance(job, dict):
         return
 
-    job_id = int(job.get("id") or 0)
-    if not job_id:
+    # Server mengirim id sebagai UUID string; int() melempar ValueError
+    # sebelum try dan membatalkan seluruh siklus monitoring.
+    raw_id = job.get("id")
+    job_id = "" if raw_id is None else str(raw_id).strip()
+    if not job_id or job_id == "0":
         return
 
     job_type = str(job.get("job_type") or "backup")

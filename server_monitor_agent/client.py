@@ -196,7 +196,7 @@ class AgentClient:
 
     def report_backup_job(
         self,
-        job_id: int,
+        job_id: str,
         status: str,
         message: str = "",
         file_path: Path | None = None,
@@ -231,7 +231,7 @@ class AgentClient:
         response.raise_for_status()
         return response.json()
 
-    def download_backup_for_restore(self, job_id: int, destination: Path) -> None:
+    def download_backup_for_restore(self, job_id: str, destination: Path) -> None:
         response = self.session.get(
             f"{self.server_url}/api/agent/v1/backup-job",
             params={"job_id": job_id},
